@@ -56,7 +56,7 @@ def main() -> None:
         "-l",
         "--latency",
         type=float,
-        default=0.025,
+        default=0.05,
         help="Assumption about the latency per loading a single file in a second",
     )
 
@@ -74,6 +74,28 @@ def main() -> None:
         type=int,
         default=1,
         help="Number of parallel processes for file transfers (default: 1 for sequential)",
+    )
+
+    parser.add_argument(
+        "-r",
+        "--max-retries",
+        type=int,
+        default=3,
+        help="Maximum number of retry attempts for failed transfers (default: 3)",
+    )
+
+    parser.add_argument(
+        "--retry-delay",
+        type=float,
+        default=2.0,
+        help="Delay in seconds between retry attempts (default: 2.0)",
+    )
+
+    parser.add_argument(
+        "--poll-interval",
+        type=float,
+        default=0.5,
+        help="Polling interval in seconds for monitoring transfers (default: 0.5)",
     )
 
     args = parser.parse_args()
@@ -183,6 +205,8 @@ def main() -> None:
     print(f"  Assumed speed: {args.speed} ({format_size(speed_bytes)}/s)")
     print(f"  Buffer size: {args.buffer_size} ({format_size(buffer_bytes)})")
     print(f"  File latency: {args.latency}s")
+    print(f"  Max retries: {args.max_retries}")
+    print(f"  Retry delay: {args.retry_delay}s")
     print(f"\nEstimates:")
     print(f"  Transfer time: {format_time(overall_eta)}")
     print(f"  Average speed: {estimated_speed:.2f} MB/s")
@@ -199,10 +223,10 @@ def main() -> None:
     stop_event = threading.Event()
     monitor_thread = threading.Thread(target=monitor_stderr, args=(sel, stop_event))
 
-    # Configuration
-    MAX_RETRIES = 3
-    RETRY_DELAY = 2.0  # seconds
-    POLL_INTERVAL = 0.5  # seconds
+    # Configuration from arguments
+    MAX_RETRIES = args.max_retries
+    RETRY_DELAY = args.retry_delay  # seconds
+    POLL_INTERVAL = args.poll_interval  # seconds
 
     # Initialize transfer states for each parallel transfer
     transfer_states: Dict[str, TransferState] = {}
