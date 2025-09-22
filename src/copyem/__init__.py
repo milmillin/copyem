@@ -604,6 +604,35 @@ def main() -> None:
 
     estimated_speed = total_size / overall_eta / 1024 / 1024
 
+    # Get smallest and largest file sizes
+    smallest_file = min(file_sizes, key=lambda x: x[1]) if file_sizes else (None, 0)
+    largest_file = max(file_sizes, key=lambda x: x[1]) if file_sizes else (None, 0)
+
+    # Display transfer summary and ask for confirmation
+    print(f"\n{'='*60}")
+    print("Transfer Summary:")
+    print(f"  Source: {src_dir}")
+    print(f"  Destination: {args.remote}:{args.dst_dir}")
+    print(f"  Total files: {len(file_sizes)}")
+    print(f"  Total size: {format_size(total_size)}")
+    print(f"  Smallest file: {format_size(smallest_file[1])}")
+    print(f"  Largest file: {format_size(largest_file[1])}")
+    print(f"\nTransfer Settings:")
+    print(f"  Parallel processes: {args.parallel}")
+    print(f"  Assumed speed: {args.speed} ({format_size(speed_bytes)}/s)")
+    print(f"  Buffer size: {args.buffer_size} ({format_size(buffer_bytes)})")
+    print(f"  File latency: {args.latency}s")
+    print(f"\nEstimates:")
+    print(f"  Transfer time: {format_time(overall_eta)}")
+    print(f"  Average speed: {estimated_speed:.2f} MB/s")
+    print(f"{'='*60}\n")
+
+    # Ask for user confirmation
+    response = input("Proceed with transfer? (y/N): ").strip().lower()
+    if response != 'y':
+        print("Transfer cancelled by user.")
+        return
+
     # Initialize the LogManager with number of parallel transfers for status lines
     global log_manager
     log_manager = LogManager(t, args.parallel, total_size)
