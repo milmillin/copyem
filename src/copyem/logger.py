@@ -56,19 +56,33 @@ class LogManager:
 
     def parse_mbuffer_status(self, text: str) -> Optional[dict]:
         """Parse mbuffer status line to extract metrics."""
-        # Pattern: "in @ 14.0 MiB/s, out @ 24.0 MiB/s,  656 MiB total, buffer  99% full"
-        # Note: there can be extra spaces before values
-        pattern = r"in @ ([\d.]+)\s+([KMG]?)iB/s.*out @ ([\d.]+)\s+([KMG]?)iB/s.*\s+([\d.]+)\s+([KMG]?)iB total.*buffer\s+(\d+)%"
-        match = re.search(pattern, text)
+        # Examples:
+        # "in @ 14.0 MiB/s, out @ 24.0 MiB/s,  656 MiB total, buffer  99% full"
+        # "in @  0.0 kiB/s, out @  0.0 kiB/s, 12.0 MiB total, buffer   0% full"
+        # Note: units can be lowercase (kiB) or uppercase (MiB), and "iB" might be missing from total
+
+        # More flexible pattern that handles various formats
+        pattern = r"in\s+@\s+([\d.]+)\s+([kKmMgG]?)iB/s.*out\s+@\s+([\d.]+)\s+([kKmMgG]?)iB/s.*?([\d.]+)\s+([kKmMgG]?)iB\s+total.*buffer\s+(\d+)%"
+        match = re.search(pattern, text, re.IGNORECASE)
 
         if match:
             in_rate, in_unit, out_rate, out_unit, total_val, total_unit, buffer_pct = match.groups()
 
-            # Convert to bytes
-            units = {"": 1, "K": 1024, "M": 1024**2, "G": 1024**3}
-            in_rate_bytes = float(in_rate) * units.get(in_unit, 1)
-            out_rate_bytes = float(out_rate) * units.get(out_unit, 1)
-            total_bytes = float(total_val) * units.get(total_unit, 1)
+            # Convert to bytes (handle both uppercase and lowercase units)
+            units = {
+                "": 1,
+                "k": 1024, "K": 1024,
+                "m": 1024**2, "M": 1024**2,
+                "g": 1024**3, "G": 1024**3
+            }
+
+            in_unit_upper = in_unit.upper() if in_unit else ""
+            out_unit_upper = out_unit.upper() if out_unit else ""
+            total_unit_upper = total_unit.upper() if total_unit else ""
+
+            in_rate_bytes = float(in_rate) * units.get(in_unit_upper, 1)
+            out_rate_bytes = float(out_rate) * units.get(out_unit_upper, 1)
+            total_bytes = float(total_val) * units.get(total_unit_upper, 1)
 
             return {
                 "in_rate": in_rate_bytes,
