@@ -5,6 +5,7 @@ import threading
 import queue
 import re
 from time import time
+from datetime import datetime
 from typing import Dict, Optional, cast
 import selectors
 import io
@@ -25,6 +26,15 @@ class LogManager:
         self.lock = threading.Lock()
         self.progress_lines = 3  # Lines for stats + progress bar + separator
         self.start_time = time()
+
+        # Create log file with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.log_filename = f"copyem_{timestamp}.log"
+        try:
+            self.log_file = open(self.log_filename, "w", buffering=1)  # Line buffering
+        except Exception as e:
+            print(f"Warning: Could not create log file {self.log_filename}: {e}")
+            self.log_file = None
 
         self.setup_display()
 
@@ -102,8 +112,26 @@ class LogManager:
             self._redraw_status_lines()
 
     def add_message(self, text: str):
-        """Add a message to the scrolling area."""
+        """Add a message to the scrolling area and write to log file."""
         with self.lock:
+            # Parse message format [suffix] message
+            suffix = ""
+            message = text
+            if text.startswith("[") and "]" in text:
+                bracket_end = text.index("]")
+                suffix = text[1:bracket_end]
+                message = text[bracket_end + 1:].strip()
+
+            # Write to log file if available
+            if self.log_file:
+                try:
+                    timestamp = time()
+                    self.log_file.write(f"{timestamp * 1000:.0f}\t{suffix}\t{message}\n")
+                    self.log_file.flush()  # Ensure it's written immediately
+                except Exception as e:
+                    # Silently fail if we can't write to log
+                    pass
+
             # Save cursor position
             sys.stdout.write(self.term.save)
 
@@ -202,7 +230,16 @@ class LogManager:
         sys.stdout.write(f"[{bar}]{progress_info}")
 
     def cleanup(self):
-        """Reset terminal to normal state."""
+        """Reset terminal to normal state and close log file."""
+        # Close log file if it exists
+        if self.log_file:
+            try:
+                self.log_file.close()
+                print(f"Log saved to: {self.log_filename}")
+            except Exception as e:
+                # Silently fail if we can't close the log
+                pass
+
         # Reset scrolling region to full terminal
         sys.stdout.write(self.term.csr(0, self.term.height))
         # Clear screen

@@ -213,10 +213,14 @@ def main() -> None:
         if "monitor_thread" in locals():
             monitor_thread.join(timeout=1)
 
-        # Clean up the LogManager
+        # Clean up the LogManager (this will also close the log file)
         if copyem.logger.log_manager:
-            copyem.logger.log_manager.cleanup()
-            copyem.logger.log_manager = None
+            try:
+                copyem.logger.log_manager.cleanup()
+            except Exception as e:
+                print(f"Error during LogManager cleanup: {e}")
+            finally:
+                copyem.logger.log_manager = None
 
         # Clean up file handles
         for handle in all_file_handles:
