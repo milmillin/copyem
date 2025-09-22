@@ -9,7 +9,7 @@ from blessed import Terminal
 
 from .utils import parse_size_to_bytes, format_size, format_time
 from .logger import LogManager, log, monitor_stderr
-from .core import get_file_sizes, schedule_files, transfer_files
+from .core import get_file_sizes, get_remote_file_sizes, schedule_files, transfer_files
 
 # Global terminal and selector
 t = Terminal()
@@ -80,6 +80,42 @@ def main() -> None:
     total_size = sum(size for _, size in file_sizes)
 
     log(f"Total size: {format_size(total_size)} ({total_size:,} bytes) across {len(file_sizes)} files")
+
+    # Check remote files to identify what needs to be transferred
+    log("Checking remote file sizes...")
+
+    # Get sizes of files that exist on remote
+    remote_file_info = get_remote_file_sizes(args.remote, args.dst_dir, [p[0] for p in file_sizes])
+
+    # Create a dict for quick lookup of remote file sizes
+    remote_sizes = {path: size for path, size in remote_file_info}
+
+    # Filter out files that already exist with same size on remote
+    files_to_transfer = []
+    skipped_files = []
+    for file_path, local_size in file_sizes:
+        if file_path in remote_sizes:
+            if remote_sizes[file_path] == local_size:
+                skipped_files.append((file_path, local_size))
+            else:
+                # File exists but size differs - transfer it
+                files_to_transfer.append((file_path, local_size))
+        else:
+            # File doesn't exist on remote - transfer it
+            files_to_transfer.append((file_path, local_size))
+
+    if skipped_files:
+        log(f"Skipping {len(skipped_files)} files that already exist on remote with same size")
+
+    if not files_to_transfer:
+        log("All files already exist on remote with matching sizes. Nothing to transfer.")
+        return
+
+    # Update file_sizes to only include files that need transfer
+    file_sizes = files_to_transfer
+    total_size = sum(size for _, size in file_sizes)
+
+    log(f"Will transfer: {format_size(total_size)} ({total_size:,} bytes) across {len(file_sizes)} files")
 
     log("Scheduling Files")
 

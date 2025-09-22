@@ -57,7 +57,7 @@ def _run_lines(cmds: list[str], stdin: Optional[str] = None, cwd: Optional[Path]
 
     if process.returncode != 0 and process.stderr is not None:
         stderr = process.stderr.read()
-        log(f"Command failed with return code {process.returncode}: {stderr}")
+        log(f"[{cmd_}] Command failed with return code {process.returncode}: {stderr}")
 
     return lines
 
@@ -103,6 +103,44 @@ def get_file_sizes(src_dir: Path, include_pattern: Optional[str]) -> list[tuple[
             size, path = sizes.split("\t")
             res.append((path, int(size)))
 
+    return res
+
+
+def get_remote_file_sizes(remote: str, cwd: str, files: list[str]) -> list[tuple[str, int]]:
+    """Get sizes for a list of files on a remote server.
+
+    Args:
+        remote: SSH remote (e.g., username@hostname.com)
+        files: List of file paths to query on the remote
+
+    Returns:
+        List of tuples of (path, size) for files that exist
+    """
+    if not files:
+        return []
+
+    log(f"Querying {len(files)} file sizes on remote: {remote}")
+
+    res: list[tuple[str, int]] = []
+
+    # Process files in batches to avoid command line length limits
+    batch_size = 100000
+    for i in range(0, len(files), batch_size):
+        cur_files = files[i : i + batch_size]
+
+        # Use xargs and stat to get file sizes efficiently
+        stat_cmd = f"cd {cwd} && xargs stat '--format=%s\t%n' 2> /dev/null"
+        ssh_stat_cmd = ["ssh", remote, stat_cmd]
+
+        # Send file list via stdin
+        stdin_data = "\n".join(cur_files)
+        sizes = _run_lines(ssh_stat_cmd, stdin=stdin_data)
+
+        for size_line in sizes:
+            size, path = size_line.split('\t', 1)
+            res.append((path, int(size)))
+
+    log(f"Successfully queried {len(res)} file sizes from remote")
     return res
 
 
