@@ -11,13 +11,97 @@ import threading
 import os
 import tempfile
 import io
+import queue
+import sys
 from blessed import Terminal
 
 t = Terminal()
 
 
+class LogManager:
+    """Manages terminal UI with scrolling messages and fixed status lines."""
+
+    def __init__(self, term: Terminal, num_status_lines: int):
+        self.term = term
+        self.num_status_lines = num_status_lines
+        self.mbuffer_status = {}  # suffix -> status text
+        self.message_queue = queue.Queue()
+        self.messages = []  # Keep track of scrolling messages
+        self.lock = threading.Lock()
+        self.setup_display()
+
+    def setup_display(self):
+        """Initialize the terminal display with scrolling region."""
+        # Clear screen
+        print(self.term.clear())
+
+        # Set up scrolling region (leave bottom lines for status)
+        # CSR sets scrolling from line 0 to height - num_status_lines - 1
+        if self.num_status_lines > 0:
+            scroll_bottom = self.term.height - self.num_status_lines - 1
+            sys.stdout.write(self.term.csr(0, scroll_bottom))
+            sys.stdout.flush()
+
+    def update_mbuffer_status(self, suffix: str, text: str):
+        """Update the mbuffer status line for a specific transfer."""
+        with self.lock:
+            self.mbuffer_status[suffix] = text.strip()
+            self._redraw_status_lines()
+
+    def add_message(self, text: str):
+        """Add a message to the scrolling area."""
+        with self.lock:
+            # Save cursor position
+            sys.stdout.write(self.term.save)
+
+            # Move to end of scrolling region and print
+            scroll_bottom = self.term.height - self.num_status_lines - 1
+            sys.stdout.write(self.term.move(scroll_bottom, 0))
+            print(text)
+
+            # Restore cursor position
+            sys.stdout.write(self.term.restore)
+            sys.stdout.flush()
+
+    def _redraw_status_lines(self):
+        """Redraw all status lines at the bottom."""
+        # Save cursor position
+        sys.stdout.write(self.term.save)
+
+        # Draw each mbuffer status line
+        sorted_suffixes = sorted(self.mbuffer_status.keys())
+        for i, suffix in enumerate(sorted_suffixes[:self.num_status_lines]):
+            if suffix in self.mbuffer_status:
+                line_pos = self.term.height - self.num_status_lines + i
+                sys.stdout.write(self.term.move(line_pos, 0))
+                sys.stdout.write(self.term.clear_eol)
+                status = self.mbuffer_status[suffix]
+                # Format status line with color
+                sys.stdout.write(f"{self.term.cyan}[mbuffer-{suffix}]{self.term.normal} {status}")
+
+        # Restore cursor position
+        sys.stdout.write(self.term.restore)
+        sys.stdout.flush()
+
+    def cleanup(self):
+        """Reset terminal to normal state."""
+        # Reset scrolling region to full terminal
+        sys.stdout.write(self.term.csr(0, self.term.height))
+        # Clear screen
+        print(self.term.clear())
+        sys.stdout.flush()
+
+
+# Global log manager (will be initialized in main)
+log_manager = None
+
+
 def log(message: str):
-    print(message)
+    """Log a message using the LogManager if available, otherwise print."""
+    if log_manager:
+        log_manager.add_message(message)
+    else:
+        print(message)
 
 
 def _run_lines(cmds: list[str], cwd: Optional[Path] = None) -> list[str]:
@@ -30,7 +114,6 @@ def _run_lines(cmds: list[str], cwd: Optional[Path] = None) -> list[str]:
     line_count = 0
 
     assert process.stdout is not None
-    print(process.stdout)
     for line in process.stdout:
         lines.append(line.rstrip("\n"))
         line_count += 1
@@ -163,18 +246,36 @@ sel = selectors.DefaultSelector()
 
 def monitor_stderr(stop_event: threading.Event) -> None:
     """Monitor stderr from processes using selector in a separate thread."""
+    global log_manager
+
     while not stop_event.is_set():
-        events = sel.select()
+        events = sel.select(timeout=0.1)
         for key, mask in events:
             fileobj = cast(io.BufferedReader, key.fileobj)
-            data = key.data
+            data = str(key.data)
             try:
                 line = fileobj.readline()
                 if line:
                     line_str = line.decode()
-                    print(f"[{data}] {line_str.rstrip()}", flush=True)
+                    line_stripped = line_str.rstrip()
+
+                    # Check if this is mbuffer output
+                    if data.startswith("mbuffer-") and log_manager:
+                        # Extract suffix from data (e.g., "mbuffer-0" -> "0")
+                        suffix = data.replace("mbuffer-", "")
+                        log_manager.update_mbuffer_status(suffix, line_stripped)
+                    else:
+                        # Regular message - add to scrolling area
+                        if log_manager:
+                            log_manager.add_message(f"[{data}] {line_stripped}")
+                        else:
+                            print(f"[{data}] {line_stripped}", flush=True)
             except Exception as e:
-                print(f"Error reading from {data}: {e}", flush=True)
+                error_msg = f"Error reading from {data}: {e}"
+                if log_manager:
+                    log_manager.add_message(error_msg)
+                else:
+                    print(error_msg, flush=True)
 
 
 def transfer_files(
@@ -375,32 +476,37 @@ def main() -> None:
         ordered_files.append(files)
         part_size = sum(size for _, size in f)
         overall_eta = max(overall_eta, eta)
-        print(f"Part {i + 1}: {len(files)} files, {format_size(part_size)}, eta: {format_time(eta)}")
+        log(f"Part {i + 1}: {len(files)} files, {format_size(part_size)}, eta: {format_time(eta)}")
 
     estimated_speed = total_size / overall_eta / 1024 / 1024
-    log(
-        f"Estimated time to transfer all files: {format_time(overall_eta)} @ avg. {estimated_speed:.2f}MB/s (max: {speed_bytes * args.parallel / 1024 / 1024:.2f}MB/s)"
-    )
 
-    # Start the monitoring thread
-    stop_event = threading.Event()
-    monitor_thread = threading.Thread(target=monitor_stderr, args=(stop_event,))
-    monitor_thread.start()
-
-    # Start all transfers and collect processes/cleanup info
-    all_processes: list[subprocess.Popen] = []
-    all_file_handles: list[io.BufferedReader] = []
-    all_paths_to_unlink: list[Path] = []
-
-    for i in range(args.parallel):
-        processes, file_handles, paths_to_unlink = transfer_files(
-            ordered_files[i], src_dir, args.remote, args.dst_dir, buffer_bytes, f"{i}"
-        )
-        all_processes.extend(processes)
-        all_file_handles.extend(file_handles)
-        all_paths_to_unlink.extend(paths_to_unlink)
+    # Initialize the LogManager with number of parallel transfers for status lines
+    global log_manager
+    log_manager = LogManager(t, args.parallel)
 
     try:
+        log(
+            f"Estimated time to transfer all files: {format_time(overall_eta)} @ avg. {estimated_speed:.2f}MB/s (max: {speed_bytes * args.parallel / 1024 / 1024:.2f}MB/s)"
+        )
+
+        # Start the monitoring thread
+        stop_event = threading.Event()
+        monitor_thread = threading.Thread(target=monitor_stderr, args=(stop_event,))
+        monitor_thread.start()
+
+        # Start all transfers and collect processes/cleanup info
+        all_processes: list[subprocess.Popen] = []
+        all_file_handles: list[io.BufferedReader] = []
+        all_paths_to_unlink: list[Path] = []
+
+        for i in range(args.parallel):
+            processes, file_handles, paths_to_unlink = transfer_files(
+                ordered_files[i], src_dir, args.remote, args.dst_dir, buffer_bytes, f"{i}"
+            )
+            all_processes.extend(processes)
+            all_file_handles.extend(file_handles)
+            all_paths_to_unlink.extend(paths_to_unlink)
+
         # Wait for all processes to complete
         log("Waiting for all transfers to complete...")
         for proc in all_processes:
@@ -414,7 +520,13 @@ def main() -> None:
     finally:
         # Stop the monitoring thread
         stop_event.set()
-        monitor_thread.join(timeout=1)
+        if 'monitor_thread' in locals():
+            monitor_thread.join(timeout=1)
+
+        # Clean up the LogManager
+        if log_manager:
+            log_manager.cleanup()
+            log_manager = None
 
         # Clean up file handles
         for handle in all_file_handles:
