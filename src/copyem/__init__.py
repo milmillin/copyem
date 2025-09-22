@@ -3,11 +3,14 @@ import logging
 from pathlib import Path
 import subprocess
 import sys
-from typing import Optional, Generator
+from typing import Optional, Generator, cast
 from blessed import Terminal
 from time import time, sleep
-import contextlib
-import math
+import selectors
+import threading
+import os
+import tempfile
+import io
 from blessed import Terminal
 
 t = Terminal()
@@ -27,10 +30,11 @@ def _run_lines(cmds: list[str], cwd: Optional[Path] = None) -> list[str]:
     line_count = 0
 
     assert process.stdout is not None
+    print(process.stdout)
     for line in process.stdout:
         lines.append(line.rstrip("\n"))
         line_count += 1
-        if line_count % 10000 == 0:
+        if line_count % 100 == 0:
             log(f"Processing {line_count:,} lines...")
 
     process.wait()
@@ -154,6 +158,96 @@ def format_time(seconds: float) -> str:
         return f"{days:.1f}d ({int(days)}d {int(hours)}h)"
 
 
+sel = selectors.DefaultSelector()
+
+
+def monitor_stderr(stop_event: threading.Event) -> None:
+    """Monitor stderr from processes using selector in a separate thread."""
+    while not stop_event.is_set():
+        events = sel.select()
+        for key, mask in events:
+            fileobj = cast(io.BufferedReader, key.fileobj)
+            data = key.data
+            try:
+                line = fileobj.readline()
+                if line:
+                    line_str = line.decode()
+                    print(f"[{data}] {line_str.rstrip()}", flush=True)
+            except Exception as e:
+                print(f"Error reading from {data}: {e}", flush=True)
+
+
+def transfer_files(
+    filelist: list[str],
+    src_dir: Path,
+    remote: str,
+    dst_dir: str,
+    buffer_size: int,
+    suffix: str,
+) -> tuple[list[subprocess.Popen], list, list[Path]]:
+    """Transfer files using tar | mbuffer | ssh pipeline.
+
+    Args:
+        filelist: List of file paths to transfer
+        src_dir: Source directory (for tar's working directory)
+        remote: SSH remote (e.g., username@hostname.com)
+        dst_dir: Destination directory on remote
+        buffer_size: Buffer size in bytes for mbuffer
+        suffix: Suffix for identifying this transfer
+
+    Returns:
+        Tuple of (processes, file handles to close, paths to unlink)
+    """
+    # Create temporary file with file list
+    f = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False)
+    filelist_path = Path(f.name)
+    for file in filelist:
+        f.write(file + "\n")
+    f.close()
+
+    pipe_name = tempfile.mkdtemp() + "/pipe"
+    os.mkfifo(pipe_name)
+
+    # Build the commands
+    tar_cmd = ["tar", "-cf", "-", "-T", str(filelist_path)]
+    mbuffer_cmd = ["mbuffer", "-m", f"{buffer_size}b", "-l", pipe_name, "-q"]
+    ssh_cmd = ["ssh", remote, f"tar -xvf - -C {dst_dir}"]
+
+    log(f"Starting transfer pipeline {suffix} to {remote}:{dst_dir}")
+    log(f"Buffer size: {format_size(buffer_size)}")
+
+    # Create the pipeline: tar | mbuffer | ssh
+    tar_proc = subprocess.Popen(tar_cmd, stdout=subprocess.PIPE, cwd=src_dir)
+
+    mbuffer_proc = subprocess.Popen(
+        mbuffer_cmd,
+        stdin=tar_proc.stdout,
+        stdout=subprocess.PIPE,
+    )
+
+    # Close tar's stdout in parent to allow proper SIGPIPE handling
+    assert tar_proc.stdout is not None
+    tar_proc.stdout.close()
+
+    ssh_proc = subprocess.Popen(ssh_cmd, stdin=mbuffer_proc.stdout, stdout=subprocess.PIPE)
+    # Close mbuffer's stdout in parent
+    assert mbuffer_proc.stdout is not None
+    mbuffer_proc.stdout.close()
+
+    pipe = open(pipe_name, "rb")
+    sel.register(pipe, selectors.EVENT_READ, data=f"mbuffer-{suffix}")
+
+    if ssh_proc.stdout is not None:
+        sel.register(ssh_proc.stdout, selectors.EVENT_READ, data=f"ssh-{suffix}")
+
+    # Return processes and cleanup info
+    processes = [tar_proc, mbuffer_proc, ssh_proc]
+    file_handles = [pipe]
+    paths_to_unlink = [filelist_path, Path(pipe_name)]
+
+    return processes, file_handles, paths_to_unlink
+
+
 def schedule_files(
     file_sizes: list[tuple[str, int]], tx_speed: int, buffer_size: int, latency: float
 ) -> tuple[list[str], float]:
@@ -209,7 +303,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Remote copy utility for efficient file transfers. Copyem uses tar to archive files and then transfers them over the network. It uses buffers and optimal file scheduling to maximize throughput."
     )
-    parser.add_argument("src_dir", type=str, help="Directory to copy")
+    parser.add_argument("src_dir", type=str, help="Source directory to copy")
+    parser.add_argument("remote", type=str, help="SSH remote (e.g., username@hostname.com)")
+    parser.add_argument("dst_dir", type=str, help="Target directory on remote")
     parser.add_argument("--include", type=str, help="Include files matching this pattern")
     parser.add_argument(
         "-s",
@@ -286,4 +382,52 @@ def main() -> None:
         f"Estimated time to transfer all files: {format_time(overall_eta)} @ avg. {estimated_speed:.2f}MB/s (max: {speed_bytes * args.parallel / 1024 / 1024:.2f}MB/s)"
     )
 
-    # print("\n".join(map(str, file_sizes[:10])))
+    # Start the monitoring thread
+    stop_event = threading.Event()
+    monitor_thread = threading.Thread(target=monitor_stderr, args=(stop_event,))
+    monitor_thread.start()
+
+    # Start all transfers and collect processes/cleanup info
+    all_processes: list[subprocess.Popen] = []
+    all_file_handles: list[io.BufferedReader] = []
+    all_paths_to_unlink: list[Path] = []
+
+    for i in range(args.parallel):
+        processes, file_handles, paths_to_unlink = transfer_files(
+            ordered_files[i], src_dir, args.remote, args.dst_dir, buffer_bytes, f"{i}"
+        )
+        all_processes.extend(processes)
+        all_file_handles.extend(file_handles)
+        all_paths_to_unlink.extend(paths_to_unlink)
+
+    try:
+        # Wait for all processes to complete
+        log("Waiting for all transfers to complete...")
+        for proc in all_processes:
+            returncode = proc.wait()
+            if returncode != 0:
+                assert isinstance(proc.args, list)
+                log(f"Process {proc.args[0]} exited with code {returncode}")
+
+        log("All transfers completed")
+
+    finally:
+        # Stop the monitoring thread
+        stop_event.set()
+        monitor_thread.join(timeout=1)
+
+        # Clean up file handles
+        for handle in all_file_handles:
+            try:
+                sel.unregister(handle)
+                handle.close()
+            except:
+                pass
+
+        # Clean up temporary files
+        for path in all_paths_to_unlink:
+            try:
+                if path.exists():
+                    path.unlink()
+            except:
+                pass
