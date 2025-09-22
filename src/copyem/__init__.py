@@ -4,9 +4,11 @@ import argparse
 import threading
 import selectors
 import io
+import time
+import subprocess
 from pathlib import Path
 from blessed import Terminal
-from typing import IO
+from typing import IO, Dict, List, Tuple, Optional
 
 from .utils import parse_size_to_bytes, format_size, format_time
 from .logger import LogManager, log, monitor_stderr
@@ -18,6 +20,19 @@ sel = selectors.DefaultSelector()
 
 # Import log_manager from logger module for global access
 import copyem.logger
+
+# Transfer state tracking
+class TransferState:
+    def __init__(self, suffix: str, file_list: List[str]):
+        self.suffix = suffix
+        self.original_files = file_list.copy()
+        self.remaining_files = file_list.copy()
+        self.processes: List[subprocess.Popen] = []
+        self.file_handles: List[IO] = []
+        self.paths_to_unlink: List[Path] = []
+        self.retry_count = 0
+        self.completed = False
+        self.failed = False
 
 
 def main() -> None:
@@ -176,10 +191,16 @@ def main() -> None:
     stop_event = threading.Event()
     monitor_thread = threading.Thread(target=monitor_stderr, args=(sel, stop_event))
 
-    # Start all transfers and collect processes/cleanup info
-    all_processes: list = []
-    all_file_handles: list[IO] = []
-    all_paths_to_unlink: list[Path] = []
+
+    # Configuration
+    MAX_RETRIES = 3
+    RETRY_DELAY = 2.0  # seconds
+    POLL_INTERVAL = 0.5  # seconds
+
+    # Initialize transfer states for each parallel transfer
+    transfer_states: Dict[str, TransferState] = {}
+    for i in range(len(ordered_files)):
+        transfer_states[str(i)] = TransferState(str(i), ordered_files[i])
 
     try:
         log(
@@ -189,23 +210,152 @@ def main() -> None:
         monitor_thread.start()
 
 
-        for i in range(len(ordered_files)):  # Use actual number of file parts
-            processes, file_handles, paths_to_unlink = transfer_files(
-                ordered_files[i], src_dir, args.remote, args.dst_dir, buffer_bytes, f"{i}", sel
-            )
-            all_processes.extend(processes)
-            all_file_handles.extend(file_handles)
-            all_paths_to_unlink.extend(paths_to_unlink)
+        # Start initial transfers
+        for suffix, state in transfer_states.items():
+            if state.remaining_files:
+                processes, file_handles, paths_to_unlink = transfer_files(
+                    state.remaining_files, src_dir, args.remote, args.dst_dir, buffer_bytes, suffix, sel
+                )
+                state.processes = processes
+                state.file_handles = file_handles
+                state.paths_to_unlink = paths_to_unlink
+                log(f"Started transfer {suffix} with {len(state.remaining_files)} files")
 
-        # Wait for all processes to complete
-        log("Waiting for all transfers to complete...")
-        for proc in all_processes:
-            returncode = proc.wait()
-            if returncode != 0:
-                assert isinstance(proc.args, list)
-                log(f"Process {proc.args[0]} exited with code {returncode}")
+        # Poll processes and handle retries
+        log("Monitoring transfers...")
+        while True:
+            all_done = True
+            any_active = False
 
-        log("All transfers completed")
+            for suffix, state in transfer_states.items():
+                if state.completed or state.failed:
+                    continue
+
+                # Check if any process in the pipeline has finished
+                any_proc_done = False
+                failed_proc = None
+                for proc in state.processes:
+                    ret = proc.poll()
+                    if ret is not None:
+                        any_proc_done = True
+                        if ret != 0:
+                            failed_proc = proc
+                            break
+
+                if not any_proc_done:
+                    # Still running
+                    all_done = False
+                    any_active = True
+                    continue
+
+                # All processes finished or one failed
+                if failed_proc:
+                    # Transfer failed
+                    log(f"Transfer {suffix} failed (process exited with code {failed_proc.returncode})")
+
+                    # Get completed files from SSH messages
+                    ssh_messages = copyem.logger.log_manager.get_ssh_messages(f"ssh-{suffix}") if copyem.logger.log_manager else []
+
+                    # Files in SSH messages (except possibly the last one) are successfully transferred
+                    completed_files = set(ssh_messages[:-1])
+                    if len(completed_files) > 0:
+                        log(f"Transfer {suffix}: {len(completed_files)} files confirmed transferred")
+
+                    # Clean up current processes
+                    for proc in state.processes:
+                        try:
+                            proc.terminate()
+                            proc.wait(timeout=1)
+                        except:
+                            try:
+                                proc.kill()
+                            except:
+                                pass
+
+                    # Clean up file handles
+                    for handle in state.file_handles:
+                        try:
+                            sel.unregister(handle)
+                            handle.close()
+                        except:
+                            pass
+
+                    # Clean up temp files
+                    for path in state.paths_to_unlink:
+                        try:
+                            if path.exists():
+                                path.unlink()
+                        except:
+                            pass
+
+                    # Prepare for retry
+                    state.remaining_files = [f for f in state.remaining_files if f not in completed_files]
+
+                    if state.remaining_files and state.retry_count < MAX_RETRIES:
+                        state.retry_count += 1
+                        log(f"Retrying transfer {suffix} (attempt {state.retry_count + 1}/{MAX_RETRIES + 1}) with {len(state.remaining_files)} remaining files")
+
+                        # Wait before retry
+                        time.sleep(RETRY_DELAY)
+
+                        # Start new transfer with remaining files
+                        processes, file_handles, paths_to_unlink = transfer_files(
+                            state.remaining_files, src_dir, args.remote, args.dst_dir, buffer_bytes, suffix, sel
+                        )
+                        state.processes = processes
+                        state.file_handles = file_handles
+                        state.paths_to_unlink = paths_to_unlink
+                        all_done = False
+                    else:
+                        if not state.remaining_files:
+                            log(f"Transfer {suffix} completed after retry")
+                            state.completed = True
+                        else:
+                            log(f"Transfer {suffix} failed after {MAX_RETRIES} retries. {len(state.remaining_files)} files remaining")
+                            state.failed = True
+                else:
+                    # Check if all processes completed successfully
+                    all_success = all(proc.poll() == 0 for proc in state.processes)
+                    if all_success:
+                        log(f"Transfer {suffix} completed successfully")
+                        state.completed = True
+
+                        # Clean up
+                        for handle in state.file_handles:
+                            try:
+                                sel.unregister(handle)
+                                handle.close()
+                            except:
+                                pass
+                        for path in state.paths_to_unlink:
+                            try:
+                                if path.exists():
+                                    path.unlink()
+                            except:
+                                pass
+                    else:
+                        # Should have been caught above, but handle it
+                        state.failed = True
+
+            if all_done:
+                break
+
+            if any_active:
+                time.sleep(POLL_INTERVAL)
+            else:
+                # All transfers either completed or failed
+                break
+
+        # Final summary
+        successful = sum(1 for s in transfer_states.values() if s.completed)
+        failed = sum(1 for s in transfer_states.values() if s.failed)
+        if failed > 0:
+            log(f"Transfers complete: {successful} successful, {failed} failed")
+            for suffix, state in transfer_states.items():
+                if state.failed:
+                    log(f"  Transfer {suffix}: {len(state.remaining_files)} files failed")
+        else:
+            log("All transfers completed successfully")
 
     finally:
         # Stop the monitoring thread
@@ -222,18 +372,17 @@ def main() -> None:
             finally:
                 copyem.logger.log_manager = None
 
-        # Clean up file handles
-        for handle in all_file_handles:
-            try:
-                sel.unregister(handle)
-                handle.close()
-            except:
-                pass
-
-        # Clean up temporary files
-        for path in all_paths_to_unlink:
-            try:
-                if path.exists():
-                    path.unlink()
-            except:
-                pass
+        # Clean up any remaining resources
+        for state in transfer_states.values():
+            for handle in state.file_handles:
+                try:
+                    sel.unregister(handle)
+                    handle.close()
+                except:
+                    pass
+            for path in state.paths_to_unlink:
+                try:
+                    if path.exists():
+                        path.unlink()
+                except:
+                    pass

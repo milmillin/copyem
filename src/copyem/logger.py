@@ -23,6 +23,7 @@ class LogManager:
         self.total_size = total_size
         self.mbuffer_status = {}  # suffix -> status text
         self.transfer_metrics: Dict[str, dict] = {}  # suffix -> parsed metrics
+        self.ssh_messages: Dict[str, list[str]] = {}  # Store SSH messages by connection ID
         self.lock = threading.Lock()
         self.progress_lines = 3  # Lines for stats + progress bar + separator
         self.start_time = time()
@@ -117,19 +118,27 @@ class LogManager:
         """Add a message to the scrolling area and write to log file."""
         with self.lock:
             # Parse message format [suffix] message
-            if text.startswith("[") and "]" in text and self.log_file:
+            if text.startswith("[") and "]" in text:
                 bracket_end = text.index("]")
                 suffix = text[1:bracket_end]
                 message = text[bracket_end + 1:].strip()
 
+                # Check if this is an SSH message
+                if suffix.startswith("ssh-"):
+                    # Store in the appropriate SSH message list
+                    if suffix not in self.ssh_messages:
+                        self.ssh_messages[suffix] = []
+                    self.ssh_messages[suffix].append(message)
+
                 # Write to log file if available
-                try:
-                    timestamp = time()
-                    self.log_file.write(f"{timestamp * 1000:.0f}\t{suffix}\t{message}\n")
-                    self.log_file.flush()  # Ensure it's written immediately
-                except Exception as e:
-                    # Silently fail if we can't write to log
-                    pass
+                if self.log_file:
+                    try:
+                        timestamp = time()
+                        self.log_file.write(f"{timestamp * 1000:.0f}\t{suffix}\t{message}\n")
+                        self.log_file.flush()  # Ensure it's written immediately
+                    except Exception as e:
+                        # Silently fail if we can't write to log
+                        pass
 
             # Save cursor position
             sys.stdout.write(self.term.save)
@@ -227,6 +236,16 @@ class LogManager:
         progress_info = f" {progress_pct:.1f}% ({format_size(int(total_transferred))}/{format_size(self.total_size)})"
 
         sys.stdout.write(f"[{bar}]{progress_info}")
+
+    def get_ssh_messages(self, suffix: str) -> list[str]:
+        """Get SSH messages for a specific connection."""
+        with self.lock:
+            return self.ssh_messages.get(suffix, []).copy()
+
+    def get_all_ssh_messages(self) -> Dict[str, list[str]]:
+        """Get all SSH messages organized by connection."""
+        with self.lock:
+            return {k: v.copy() for k, v in self.ssh_messages.items()}
 
     def cleanup(self):
         """Reset terminal to normal state and close log file."""
