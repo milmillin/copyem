@@ -35,7 +35,7 @@ class LogManager:
         self.start_time = time()
 
         # Check for terminal capabilities
-        self.has_dim = False # self._check_capability('dim')
+        self.has_dim = False  # self._check_capability('dim')
 
         self.setup_display()
 
@@ -64,25 +64,25 @@ class LogManager:
         """Parse mbuffer status line to extract metrics."""
         # Pattern: "in @ 14.0 MiB/s, out @ 24.0 MiB/s,  656 MiB total, buffer  99% full"
         # Note: there can be extra spaces before values
-        pattern = r'in @ ([\d.]+)\s+([KMG]?)iB/s.*out @ ([\d.]+)\s+([KMG]?)iB/s.*\s+([\d.]+)\s+([KMG]?)iB total.*buffer\s+(\d+)%'
+        pattern = r"in @ ([\d.]+)\s+([KMG]?)iB/s.*out @ ([\d.]+)\s+([KMG]?)iB/s.*\s+([\d.]+)\s+([KMG]?)iB total.*buffer\s+(\d+)%"
         match = re.search(pattern, text)
 
         if match:
             in_rate, in_unit, out_rate, out_unit, total_val, total_unit, buffer_pct = match.groups()
 
             # Convert to bytes
-            units = {'': 1, 'K': 1024, 'M': 1024**2, 'G': 1024**3}
+            units = {"": 1, "K": 1024, "M": 1024**2, "G": 1024**3}
             in_rate_bytes = float(in_rate) * units.get(in_unit, 1)
             out_rate_bytes = float(out_rate) * units.get(out_unit, 1)
             total_bytes = float(total_val) * units.get(total_unit, 1)
 
             return {
-                'in_rate': in_rate_bytes,
-                'out_rate': out_rate_bytes,
-                'total_bytes': total_bytes,
-                'buffer_pct': int(buffer_pct),
-                'in_rate_str': f"{in_rate} {in_unit}iB/s" if in_unit else f"{in_rate} iB/s",
-                'out_rate_str': f"{out_rate} {out_unit}iB/s" if out_unit else f"{out_rate} iB/s",
+                "in_rate": in_rate_bytes,
+                "out_rate": out_rate_bytes,
+                "total_bytes": total_bytes,
+                "buffer_pct": int(buffer_pct),
+                "in_rate_str": f"{in_rate} {in_unit}iB/s" if in_unit else f"{in_rate} iB/s",
+                "out_rate_str": f"{out_rate} {out_unit}iB/s" if out_unit else f"{out_rate} iB/s",
             }
         return None
 
@@ -130,7 +130,7 @@ class LogManager:
 
         # Draw each mbuffer status line
         sorted_suffixes = sorted(self.mbuffer_status.keys())
-        for i, suffix in enumerate(sorted_suffixes[:self.num_status_lines]):
+        for i, suffix in enumerate(sorted_suffixes[: self.num_status_lines]):
             if suffix in self.mbuffer_status:
                 line_pos = self.term.height - self.num_status_lines - self.progress_lines + i + 1
                 sys.stdout.write(self.term.move(line_pos, 0))
@@ -149,9 +149,9 @@ class LogManager:
     def _draw_progress(self):
         """Draw the progress bar and cumulative statistics."""
         # Calculate cumulative metrics
-        total_transferred = sum(m.get('total_bytes', 0) for m in self.transfer_metrics.values())
-        total_in_rate = sum(m.get('in_rate', 0) for m in self.transfer_metrics.values())
-        total_out_rate = sum(m.get('out_rate', 0) for m in self.transfer_metrics.values())
+        total_transferred = sum(m.get("total_bytes", 0) for m in self.transfer_metrics.values())
+        total_in_rate = sum(m.get("in_rate", 0) for m in self.transfer_metrics.values())
+        total_out_rate = sum(m.get("out_rate", 0) for m in self.transfer_metrics.values())
 
         # Calculate progress
         progress_pct = 0
@@ -161,16 +161,23 @@ class LogManager:
         # Calculate elapsed time
         elapsed = time() - self.start_time
 
+        # Calculate average speed based on actual transfer
+        avg_speed = total_transferred / elapsed if elapsed > 0 else 0
+
+        # Calculate remaining time based on average speed
+        remaining_bytes = max(0, self.total_size - total_transferred)
+        eta = remaining_bytes / avg_speed if avg_speed > 0 else 0
+
         # Draw stats line
         stats_pos = self.term.height - 2
         sys.stdout.write(self.term.move(stats_pos, 0))
         sys.stdout.write(self.term.clear_eol)
 
         stats_str = (
-            f"Total: {format_size(int(total_transferred))} / {format_size(self.total_size)} | "
-            f"In: {format_size(int(total_in_rate))}/s | "
-            f"Out: {format_size(int(total_out_rate))}/s | "
-            f"Time: {format_time(elapsed)}"
+            f"Curr: {format_size(int(total_out_rate))}/s | "
+            f"Avg: {format_size(int(avg_speed))}/s | "
+            f"Time: {format_time(elapsed)} | "
+            f"ETA: {format_time(eta)}"
         )
         sys.stdout.write(self.term.bold + stats_str + self.term.normal)
 
@@ -340,19 +347,22 @@ def format_size(size_bytes: int) -> str:
 
 # Format ETA in appropriate units
 def format_time(seconds: float) -> str:
+    seconds = int(seconds)
     if seconds < 60:
-        return f"{seconds:.1f}s"
+        return f"{seconds:02d}s"
     elif seconds < 3600:
-        minutes = seconds / 60
-        return f"{minutes:.1f}m ({seconds:.0f}s)"
+        minutes = seconds // 60
+        seconds = seconds % 60
+        return f"{minutes:02d}m{seconds:02d}s)"
     elif seconds < 86400:
-        hours = seconds / 3600
-        minutes = (seconds % 3600) / 60
-        return f"{hours:.1f}h ({int(hours)}h {int(minutes)}m)"
+        hours = seconds // 3600
+        minutes = (seconds % 3600) // 60
+        seconds = seconds % 60
+        return f"{hours}h{minutes:02d}m{seconds:02d}s"
     else:
-        days = seconds / 86400
-        hours = (seconds % 86400) / 3600
-        return f"{days:.1f}d ({int(days)}d {int(hours)}h)"
+        days = seconds // 86400
+        hours = (seconds % 86400) // 3600
+        return f"{days}d{hours}h"
 
 
 sel = selectors.DefaultSelector()
@@ -634,7 +644,7 @@ def main() -> None:
     finally:
         # Stop the monitoring thread
         stop_event.set()
-        if 'monitor_thread' in locals():
+        if "monitor_thread" in locals():
             monitor_thread.join(timeout=1)
 
         # Clean up the LogManager
