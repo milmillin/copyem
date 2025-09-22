@@ -7,7 +7,7 @@ import io
 import selectors
 import threading
 from pathlib import Path
-from typing import Optional
+from typing import Optional, IO
 
 from .logger import log
 from .utils import format_size, format_time
@@ -203,7 +203,7 @@ def transfer_files(
     buffer_size: int,
     suffix: str,
     sel: selectors.BaseSelector,
-) -> tuple[list[subprocess.Popen], list, list[Path]]:
+) -> tuple[list[subprocess.Popen], list[IO], list[Path]]:
     """Transfer files using tar | mbuffer | ssh pipeline.
 
     Args:
@@ -218,6 +218,7 @@ def transfer_files(
     Returns:
         Tuple of (processes, file handles to close, paths to unlink)
     """
+
     # Create temporary file with file list
     f = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False)
     filelist_path = Path(f.name)
@@ -229,7 +230,7 @@ def transfer_files(
     os.mkfifo(pipe_name)
 
     # Build the commands
-    tar_cmd = ["tar", "-cf", "-", "-T", str(filelist_path)]
+    tar_cmd = ["tar", "-cvf", "-", "-T", str(filelist_path)]
     mbuffer_cmd = ["mbuffer", "-m", f"{buffer_size}b", "-l", pipe_name, "-q"]
     ssh_cmd = ["ssh", remote, f"tar -xvf - -C {dst_dir}"]
 
@@ -237,7 +238,7 @@ def transfer_files(
     log(f"Buffer size: {format_size(buffer_size)}")
 
     # Create the pipeline: tar | mbuffer | ssh
-    tar_proc = subprocess.Popen(tar_cmd, stdout=subprocess.PIPE, cwd=src_dir)
+    tar_proc = subprocess.Popen(tar_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=src_dir)
 
     mbuffer_proc = subprocess.Popen(
         mbuffer_cmd,
@@ -255,14 +256,19 @@ def transfer_files(
     mbuffer_proc.stdout.close()
 
     pipe = open(pipe_name, "rb")
+
+    # Return processes and cleanup info
+    processes = [tar_proc, mbuffer_proc, ssh_proc]
+    file_handles: list[IO] = [pipe]
+    paths_to_unlink = [filelist_path, Path(pipe_name)]
+
     sel.register(pipe, selectors.EVENT_READ, data=f"mbuffer-{suffix}")
 
     if ssh_proc.stdout is not None:
         sel.register(ssh_proc.stdout, selectors.EVENT_READ, data=f"ssh-{suffix}")
-
-    # Return processes and cleanup info
-    processes = [tar_proc, mbuffer_proc, ssh_proc]
-    file_handles = [pipe]
-    paths_to_unlink = [filelist_path, Path(pipe_name)]
+        file_handles.append(ssh_proc.stdout)
+    if tar_proc.stderr is not None:
+        sel.register(tar_proc.stderr, selectors.EVENT_READ, data=f"tar-{suffix}")
+        file_handles.append(tar_proc.stderr)
 
     return processes, file_handles, paths_to_unlink

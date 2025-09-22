@@ -45,7 +45,7 @@ class LogManager:
     def setup_display(self):
         """Initialize the terminal display with scrolling region."""
         # Clear screen
-        print(self.term.clear())
+        # print(self.term.clear())
 
         # Set up scrolling region (leave bottom lines for status and progress)
         # CSR sets scrolling from line 0 to height - num_status_lines - progress_lines - 1
@@ -103,6 +103,8 @@ class LogManager:
             metrics = self.parse_mbuffer_status(text)
             if metrics:
                 self.transfer_metrics[suffix] = metrics
+            else:
+                del self.transfer_metrics[suffix]
 
             self._redraw_status_lines()
 
@@ -115,7 +117,8 @@ class LogManager:
             # Move to end of scrolling region and print
             scroll_bottom = self.term.height - self.num_status_lines - self.progress_lines - 1
             sys.stdout.write(self.term.move(scroll_bottom, 0))
-            print(text)
+            sys.stdout.write("\n" + text)
+            # print("\n" + text, end="")
 
             # Restore cursor position
             sys.stdout.write(self.term.restore)
@@ -217,12 +220,12 @@ class LogManager:
         # Reset scrolling region to full terminal
         sys.stdout.write(self.term.csr(0, self.term.height))
         # Clear screen
-        print(self.term.clear())
+        # print(self.term.clear())
         sys.stdout.flush()
 
 
 # Global log manager (will be initialized in main)
-log_manager = None
+log_manager: Optional[LogManager] = None
 
 
 def log(message: str):

@@ -6,6 +6,7 @@ import selectors
 import io
 from pathlib import Path
 from blessed import Terminal
+from typing import IO
 
 from .utils import parse_size_to_bytes, format_size, format_time
 from .logger import LogManager, log, monitor_stderr
@@ -172,21 +173,21 @@ def main() -> None:
 
     # Initialize the LogManager with number of parallel transfers for status lines
     copyem.logger.log_manager = LogManager(t, actual_parallel, total_size)
+    stop_event = threading.Event()
+    monitor_thread = threading.Thread(target=monitor_stderr, args=(sel, stop_event))
+
+    # Start all transfers and collect processes/cleanup info
+    all_processes: list = []
+    all_file_handles: list[IO] = []
+    all_paths_to_unlink: list[Path] = []
 
     try:
         log(
             f"Estimated time to transfer all files: {format_time(overall_eta)} @ avg. {estimated_speed:.2f}MB/s (max: {speed_bytes * actual_parallel / 1024 / 1024:.2f}MB/s)"
         )
 
-        # Start the monitoring thread
-        stop_event = threading.Event()
-        monitor_thread = threading.Thread(target=monitor_stderr, args=(sel, stop_event))
         monitor_thread.start()
 
-        # Start all transfers and collect processes/cleanup info
-        all_processes: list = []
-        all_file_handles: list[io.BufferedReader] = []
-        all_paths_to_unlink: list[Path] = []
 
         for i in range(len(ordered_files)):  # Use actual number of file parts
             processes, file_handles, paths_to_unlink = transfer_files(
