@@ -119,21 +119,27 @@ def main() -> None:
 
     log("Scheduling Files")
 
-    file_parts: list[list[tuple[str, int]]] = [[] for _ in range(args.parallel)]
+    # Adjust parallel count if we have fewer files than requested parallel transfers
+    actual_parallel = min(args.parallel, len(file_sizes))
+    if actual_parallel < args.parallel:
+        log(f"Adjusting parallel transfers from {args.parallel} to {actual_parallel} (limited by file count)")
+
+    file_parts: list[list[tuple[str, int]]] = [[] for _ in range(actual_parallel)]
     file_sizes.sort(key=lambda x: x[1])
     for i, f_ in enumerate(file_sizes):
-        file_parts[i % args.parallel].append(f_)
+        file_parts[i % actual_parallel].append(f_)
 
     ordered_files: list[list[str]] = []
     overall_eta = 0.0
     for i, f in enumerate(file_parts):
-        files, eta = schedule_files(f, speed_bytes, buffer_bytes, args.latency)
-        ordered_files.append(files)
-        part_size = sum(size for _, size in f)
-        overall_eta = max(overall_eta, eta)
-        log(f"Part {i + 1}: {len(files)} files, {format_size(part_size)}, eta: {format_time(eta)}")
+        if f:  # Only process non-empty file parts
+            files, eta = schedule_files(f, speed_bytes, buffer_bytes, args.latency)
+            ordered_files.append(files)
+            part_size = sum(size for _, size in f)
+            overall_eta = max(overall_eta, eta)
+            log(f"Part {i + 1}: {len(files)} files, {format_size(part_size)}, eta: {format_time(eta)}")
 
-    estimated_speed = total_size / overall_eta / 1024 / 1024
+    estimated_speed = total_size / overall_eta / 1024 / 1024 if overall_eta > 0 else 0
 
     # Get smallest and largest file sizes
     smallest_file = min(file_sizes, key=lambda x: x[1]) if file_sizes else (None, 0)
@@ -149,7 +155,7 @@ def main() -> None:
     print(f"  Smallest file: {format_size(smallest_file[1])}")
     print(f"  Largest file: {format_size(largest_file[1])}")
     print(f"\nTransfer Settings:")
-    print(f"  Parallel processes: {args.parallel}")
+    print(f"  Parallel processes: {actual_parallel}")
     print(f"  Assumed speed: {args.speed} ({format_size(speed_bytes)}/s)")
     print(f"  Buffer size: {args.buffer_size} ({format_size(buffer_bytes)})")
     print(f"  File latency: {args.latency}s")
@@ -165,11 +171,11 @@ def main() -> None:
         return
 
     # Initialize the LogManager with number of parallel transfers for status lines
-    copyem.logger.log_manager = LogManager(t, args.parallel, total_size)
+    copyem.logger.log_manager = LogManager(t, actual_parallel, total_size)
 
     try:
         log(
-            f"Estimated time to transfer all files: {format_time(overall_eta)} @ avg. {estimated_speed:.2f}MB/s (max: {speed_bytes * args.parallel / 1024 / 1024:.2f}MB/s)"
+            f"Estimated time to transfer all files: {format_time(overall_eta)} @ avg. {estimated_speed:.2f}MB/s (max: {speed_bytes * actual_parallel / 1024 / 1024:.2f}MB/s)"
         )
 
         # Start the monitoring thread
@@ -182,7 +188,7 @@ def main() -> None:
         all_file_handles: list[io.BufferedReader] = []
         all_paths_to_unlink: list[Path] = []
 
-        for i in range(args.parallel):
+        for i in range(len(ordered_files)):  # Use actual number of file parts
             processes, file_handles, paths_to_unlink = transfer_files(
                 ordered_files[i], src_dir, args.remote, args.dst_dir, buffer_bytes, f"{i}", sel
             )
