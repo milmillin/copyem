@@ -106,8 +106,10 @@ class LogManager:
             metrics = self.parse_mbuffer_status(text)
             if metrics:
                 self.transfer_metrics[suffix] = metrics
-            else:
-                del self.transfer_metrics[suffix]
+            elif suffix in self.transfer_metrics:
+                self.transfer_metrics[suffix]["in_rate"] = 0
+                self.transfer_metrics[suffix]["out_rate"] = 0
+                self.transfer_metrics[suffix]["buffer_pct"] = 0
 
             self._redraw_status_lines()
 
@@ -115,15 +117,12 @@ class LogManager:
         """Add a message to the scrolling area and write to log file."""
         with self.lock:
             # Parse message format [suffix] message
-            suffix = ""
-            message = text
-            if text.startswith("[") and "]" in text:
+            if text.startswith("[") and "]" in text and self.log_file:
                 bracket_end = text.index("]")
                 suffix = text[1:bracket_end]
                 message = text[bracket_end + 1:].strip()
 
-            # Write to log file if available
-            if self.log_file:
+                # Write to log file if available
                 try:
                     timestamp = time()
                     self.log_file.write(f"{timestamp * 1000:.0f}\t{suffix}\t{message}\n")

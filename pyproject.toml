@@ -21,3 +21,10 @@ copyem = "copyem:main"
 [build-system]
 requires = ["uv_build>=0.8.19,<0.9.0"]
 build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "ipykernel>=6.30.1",
+    "matplotlib>=3.9.4",
+    "numpy>=2.0.2",
+]
