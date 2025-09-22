@@ -21,12 +21,13 @@ sel = selectors.DefaultSelector()
 # Import log_manager from logger module for global access
 import copyem.logger
 
+
 # Transfer state tracking
 class TransferState:
     def __init__(self, suffix: str, file_list: List[str]):
         self.suffix = suffix
-        self.original_files = file_list.copy()
         self.remaining_files = file_list.copy()
+        self.completed_size = 0  # Total size of successfully transferred files
         self.processes: List[subprocess.Popen] = []
         self.file_handles: List[IO] = []
         self.paths_to_unlink: List[Path] = []
@@ -55,7 +56,7 @@ def main() -> None:
         "-l",
         "--latency",
         type=float,
-        default=0.15,
+        default=0.025,
         help="Assumption about the latency per loading a single file in a second",
     )
 
@@ -129,6 +130,13 @@ def main() -> None:
 
     # Update file_sizes to only include files that need transfer
     file_sizes = files_to_transfer
+
+    # HACK: add TAR header of 512 bytes and extra for long paths. I don't know exactly how TAR encoding works.
+    file_sizes = [(f[0], f[1] + 512 + max(len(f[0]) - 100, 0)) for f in file_sizes]
+
+    # Create file size mappings for each parallel transfer
+    file_size_map: Dict[str, int] = {filepath: size for filepath, size in file_sizes}
+
     total_size = sum(size for _, size in file_sizes)
 
     log(f"Will transfer: {format_size(total_size)} ({total_size:,} bytes) across {len(file_sizes)} files")
@@ -182,7 +190,7 @@ def main() -> None:
 
     # Ask for user confirmation
     response = input("Proceed with transfer? (y/N): ").strip().lower()
-    if response != 'y':
+    if response != "y":
         print("Transfer cancelled by user.")
         return
 
@@ -190,7 +198,6 @@ def main() -> None:
     copyem.logger.log_manager = LogManager(t, actual_parallel, total_size)
     stop_event = threading.Event()
     monitor_thread = threading.Thread(target=monitor_stderr, args=(sel, stop_event))
-
 
     # Configuration
     MAX_RETRIES = 3
@@ -209,7 +216,6 @@ def main() -> None:
 
         monitor_thread.start()
 
-
         # Start initial transfers
         for suffix, state in transfer_states.items():
             if state.remaining_files:
@@ -224,29 +230,21 @@ def main() -> None:
         # Poll processes and handle retries
         log("Monitoring transfers...")
         while True:
-            all_done = True
-            any_active = False
-
             for suffix, state in transfer_states.items():
-                if state.completed or state.failed:
+                if state.failed:
                     continue
 
                 # Check if any process in the pipeline has finished
-                any_proc_done = False
+                all_proc_done = True
                 failed_proc = None
                 for proc in state.processes:
                     ret = proc.poll()
                     if ret is not None:
-                        any_proc_done = True
+                        # process finished
                         if ret != 0:
                             failed_proc = proc
-                            break
-
-                if not any_proc_done:
-                    # Still running
-                    all_done = False
-                    any_active = True
-                    continue
+                    else:
+                        all_proc_done = False
 
                 # All processes finished or one failed
                 if failed_proc:
@@ -254,12 +252,26 @@ def main() -> None:
                     log(f"Transfer {suffix} failed (process exited with code {failed_proc.returncode})")
 
                     # Get completed files from SSH messages
-                    ssh_messages = copyem.logger.log_manager.get_ssh_messages(f"ssh-{suffix}") if copyem.logger.log_manager else []
+                    if copyem.logger.log_manager is not None:
+                        ssh_messages = copyem.logger.log_manager.get_ssh_messages(f"ssh-{suffix}")[:-1]
+                        # Remove the last message from the list
+                        copyem.logger.log_manager.pop_ssh_messages(f"ssh-{suffix}")
+                    else:
+                        ssh_messages = []
 
-                    # Files in SSH messages (except possibly the last one) are successfully transferred
-                    completed_files = set(ssh_messages[:-1])
+                    # Files in SSH messages are successfully transferred
+                    completed_files = set(ssh_messages)
                     if len(completed_files) > 0:
-                        log(f"Transfer {suffix}: {len(completed_files)} files confirmed transferred")
+                        # Calculate size of completed files
+                        state.completed_size = sum(file_size_map.get(f, 0) for f in completed_files)
+
+                        # Update the logger with the completed size
+                        if copyem.logger.log_manager:
+                            copyem.logger.log_manager.update_completed_size(suffix, state.completed_size)
+
+                        log(
+                            f"Transfer {suffix}: {len(completed_files)} files confirmed transferred ({format_size(state.completed_size)})"
+                        )
 
                     # Clean up current processes
                     for proc in state.processes:
@@ -292,8 +304,10 @@ def main() -> None:
                     state.remaining_files = [f for f in state.remaining_files if f not in completed_files]
 
                     if state.remaining_files and state.retry_count < MAX_RETRIES:
+                        log(
+                            f"Retrying transfer {suffix} (attempt {state.retry_count + 1}/{MAX_RETRIES + 1}) with {len(state.remaining_files)} remaining files"
+                        )
                         state.retry_count += 1
-                        log(f"Retrying transfer {suffix} (attempt {state.retry_count + 1}/{MAX_RETRIES + 1}) with {len(state.remaining_files)} remaining files")
 
                         # Wait before retry
                         time.sleep(RETRY_DELAY)
@@ -305,42 +319,34 @@ def main() -> None:
                         state.processes = processes
                         state.file_handles = file_handles
                         state.paths_to_unlink = paths_to_unlink
-                        all_done = False
-                    else:
-                        if not state.remaining_files:
-                            log(f"Transfer {suffix} completed after retry")
-                            state.completed = True
-                        else:
-                            log(f"Transfer {suffix} failed after {MAX_RETRIES} retries. {len(state.remaining_files)} files remaining")
-                            state.failed = True
-                else:
-                    # Check if all processes completed successfully
-                    all_success = all(proc.poll() == 0 for proc in state.processes)
-                    if all_success:
-                        log(f"Transfer {suffix} completed successfully")
-                        state.completed = True
-
-                        # Clean up
-                        for handle in state.file_handles:
-                            try:
-                                sel.unregister(handle)
-                                handle.close()
-                            except:
-                                pass
-                        for path in state.paths_to_unlink:
-                            try:
-                                if path.exists():
-                                    path.unlink()
-                            except:
-                                pass
-                    else:
-                        # Should have been caught above, but handle it
+                    elif state.remaining_files:
+                        log(
+                            f"Transfer {suffix} failed after {MAX_RETRIES} retries. {len(state.remaining_files)} files remaining"
+                        )
                         state.failed = True
+                elif all_proc_done:
+                    # Check if all processes completed successfully
+                    assert all(proc.poll() == 0 for proc in state.processes)
+                    log(f"Transfer {suffix} completed successfully")
+                    state.completed = True
 
-            if all_done:
-                break
+                    # Clean up
+                    for handle in state.file_handles:
+                        try:
+                            sel.unregister(handle)
+                            handle.close()
+                        except:
+                            pass
+                    for path in state.paths_to_unlink:
+                        try:
+                            if path.exists():
+                                path.unlink()
+                        except:
+                            pass
 
-            if any_active:
+            all_terminated = all(state.completed or state.failed for state in transfer_states.values())
+
+            if not all_terminated:
                 time.sleep(POLL_INTERVAL)
             else:
                 # All transfers either completed or failed

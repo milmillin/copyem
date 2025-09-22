@@ -24,6 +24,7 @@ class LogManager:
         self.mbuffer_status = {}  # suffix -> status text
         self.transfer_metrics: Dict[str, dict] = {}  # suffix -> parsed metrics
         self.ssh_messages: Dict[str, list[str]] = {}  # Store SSH messages by connection ID
+        self.completed_file_sizes: Dict[str, int] = {}  # Store completed file sizes per transfer
         self.lock = threading.Lock()
         self.progress_lines = 3  # Lines for stats + progress bar + separator
         self.start_time = time()
@@ -75,12 +76,7 @@ class LogManager:
             in_rate, in_unit, out_rate, out_unit, total_val, total_unit, buffer_pct = match.groups()
 
             # Convert to bytes (handle both uppercase and lowercase units)
-            units = {
-                "": 1,
-                "k": 1024, "K": 1024,
-                "m": 1024**2, "M": 1024**2,
-                "g": 1024**3, "G": 1024**3
-            }
+            units = {"": 1, "k": 1024, "K": 1024, "m": 1024**2, "M": 1024**2, "g": 1024**3, "G": 1024**3}
 
             in_unit_upper = in_unit.upper() if in_unit else ""
             out_unit_upper = out_unit.upper() if out_unit else ""
@@ -121,7 +117,7 @@ class LogManager:
             if text.startswith("[") and "]" in text:
                 bracket_end = text.index("]")
                 suffix = text[1:bracket_end]
-                message = text[bracket_end + 1:].strip()
+                message = text[bracket_end + 1 :].strip()
 
                 # Check if this is an SSH message
                 if suffix.startswith("ssh-"):
@@ -186,23 +182,27 @@ class LogManager:
         """Draw the progress bar and cumulative statistics."""
         # Calculate cumulative metrics
         total_transferred = sum(m.get("total_bytes", 0) for m in self.transfer_metrics.values())
-        total_in_rate = sum(m.get("in_rate", 0) for m in self.transfer_metrics.values())
+        # total_in_rate = sum(m.get("in_rate", 0) for m in self.transfer_metrics.values())
         total_out_rate = sum(m.get("out_rate", 0) for m in self.transfer_metrics.values())
+
+        # Add completed file sizes to the total transferred
+        total_completed = sum(self.completed_file_sizes.values())
+        total_progress = total_transferred + total_completed
 
         # Calculate progress
         progress_pct = 0
         if self.total_size > 0:
-            progress_pct = min(100, (total_transferred / self.total_size) * 100)
+            progress_pct = min(100, (total_progress / self.total_size) * 100)
 
         # Calculate elapsed time
         elapsed = time() - self.start_time
 
-        # Calculate average speed based on actual transfer
-        avg_speed = total_transferred / elapsed if elapsed > 0 else 0
+        # Calculate average speed based on actual transfer (including completed files)
+        avg_speed = total_progress / elapsed if elapsed > 0 else 0
 
         # Calculate remaining time based on average speed
-        remaining_bytes = max(0, self.total_size - total_transferred)
-        eta = remaining_bytes / avg_speed if avg_speed > 0 else 0
+        remaining_bytes = max(0, self.total_size - total_progress)
+        eta = remaining_bytes / total_out_rate if total_out_rate > 0 else 0
 
         # Draw stats line
         stats_pos = self.term.height - 2
@@ -233,7 +233,7 @@ class LogManager:
         empty_bar = "░" * empty if empty > 0 else ""
 
         bar = filled_bar + empty_bar
-        progress_info = f" {progress_pct:.1f}% ({format_size(int(total_transferred))}/{format_size(self.total_size)})"
+        progress_info = f" {progress_pct:.1f}% ({format_size(int(total_progress))}/{format_size(self.total_size)})"
 
         sys.stdout.write(f"[{bar}]{progress_info}")
 
@@ -242,10 +242,22 @@ class LogManager:
         with self.lock:
             return self.ssh_messages.get(suffix, []).copy()
 
+    def pop_ssh_messages(self, suffix: str) -> Optional[str]:
+        """Pop the last SSH message for a specific connection."""
+        with self.lock:
+            if suffix in self.ssh_messages:
+                return self.ssh_messages[suffix].pop()
+            return None
+
     def get_all_ssh_messages(self) -> Dict[str, list[str]]:
         """Get all SSH messages organized by connection."""
         with self.lock:
             return {k: v.copy() for k, v in self.ssh_messages.items()}
+
+    def update_completed_size(self, suffix: str, size: int):
+        """Update the completed file size for a specific transfer."""
+        with self.lock:
+            self.completed_file_sizes[suffix] = size
 
     def cleanup(self):
         """Reset terminal to normal state and close log file."""
