@@ -22,14 +22,9 @@ class LogManager:
         self.total_size = total_size
         self.mbuffer_status = {}  # suffix -> status text
         self.transfer_metrics: Dict[str, dict] = {}  # suffix -> parsed metrics
-        self.message_queue = queue.Queue()
-        self.messages = []  # Keep track of scrolling messages
         self.lock = threading.Lock()
         self.progress_lines = 3  # Lines for stats + progress bar + separator
         self.start_time = time()
-
-        # Check for terminal capabilities
-        self.has_dim = False  # self._check_capability('dim')
 
         self.setup_display()
 
@@ -89,8 +84,6 @@ class LogManager:
                 "out_rate": out_rate_bytes,
                 "total_bytes": total_bytes,
                 "buffer_pct": int(buffer_pct),
-                "in_rate_str": f"{in_rate} {in_unit}iB/s" if in_unit else f"{in_rate} iB/s",
-                "out_rate_str": f"{out_rate} {out_unit}iB/s" if out_unit else f"{out_rate} iB/s",
             }
         return None
 
@@ -133,11 +126,7 @@ class LogManager:
         separator_pos = self.term.height - self.num_status_lines - self.progress_lines
         sys.stdout.write(self.term.move(separator_pos, 0))
         sys.stdout.write(self.term.clear_eol)
-        # Use dim if available, otherwise just draw the line
-        if self.has_dim:
-            sys.stdout.write(self.term.dim + "─" * self.term.width + self.term.normal)
-        else:
-            sys.stdout.write("─" * self.term.width)
+        sys.stdout.write("─" * self.term.width)
 
         # Draw each mbuffer status line
         sorted_suffixes = sorted(self.mbuffer_status.keys())
@@ -205,13 +194,10 @@ class LogManager:
         # Create the progress bar
         filled_bar = self.term.green("█" * filled) if filled > 0 else ""
         # Use dim if available for empty part, otherwise use regular
-        if self.has_dim and empty > 0:
-            empty_bar = self.term.dim("░" * empty)
-        else:
-            empty_bar = "░" * empty if empty > 0 else ""
+        empty_bar = "░" * empty if empty > 0 else ""
 
         bar = filled_bar + empty_bar
-        progress_info = f" {progress_pct:.1f}% ({format_size(int(total_transferred))} / {format_size(self.total_size)})"
+        progress_info = f" {progress_pct:.1f}% ({format_size(int(total_transferred))}/{format_size(self.total_size)})"
 
         sys.stdout.write(f"[{bar}]{progress_info}")
 
