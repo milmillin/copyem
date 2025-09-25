@@ -76,12 +76,15 @@ def get_file_sizes(src_dir: Path, include_pattern: Optional[str]) -> list[tuple[
     if include_pattern:
         log(f"Include pattern: {include_pattern}")
 
-    args = ["find", "-type", "f"]
+    args = ["find", "-type", "f",]
+    args_l = ["find", "-type", "l"]
     if include_pattern is not None:
         args.extend(["-path", "./" + include_pattern])
-    # args.append("-print0")
+        args_l.extend(["-path", "./" + include_pattern])
     files = _run_lines(args, cwd=src_dir)
-    log(f"Found {len(files)} files")
+    files.extend(_run_lines(args_l, cwd=src_dir))
+
+    log(f"Found {len(files):,} files")
     for f in files[:10]:
         log(f"  {f}")
 

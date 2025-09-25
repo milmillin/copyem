@@ -384,7 +384,8 @@ def main() -> None:
         total_transferred = sum(state.completed_size for state in transfer_states.values())
         total_failed_size = sum(
             sum(file_size_map.get(f, 0) for f in state.remaining_files)
-            for state in transfer_states.values() if state.failed
+            for state in transfer_states.values()
+            if state.failed
         )
 
         # Count transfers and files
@@ -397,51 +398,49 @@ def main() -> None:
         effective_speed = total_transferred / total_elapsed if total_elapsed > 0 else 0
 
         # Print detailed summary
-        print(f"\n{'='*60}")
-        print("TRANSFER SUMMARY")
-        print(f"{'='*60}")
+        log(f"\n{'='*60}")
+        log("TRANSFER SUMMARY")
+        log(f"{'='*60}")
 
-        print(f"\nTransfer Statistics:")
-        print(f"  Total time: {format_time(total_elapsed)}")
-        print(f"  Files transferred: {total_files_transferred}/{len(file_sizes)}")
-        print(f"  Data transferred: {format_size(total_transferred)} ({total_transferred:,} bytes)")
+        log(f"\nTransfer Statistics:")
+        log(f"  Total time: {format_time(total_elapsed)}")
+        log(f"  Files transferred: {total_files_transferred}/{len(file_sizes)}")
+        log(f"  Data transferred: {format_size(total_transferred)} ({total_transferred:,} bytes)")
         if total_failed_size > 0:
-            print(f"  Files failed: {total_files_failed}")
-            print(f"  Data failed: {format_size(total_failed_size)} ({total_failed_size:,} bytes)")
-        print(f"  Effective speed: {effective_speed / 1024 / 1024:.2f} MB/s")
+            log(f"  Files failed: {total_files_failed}")
+            log(f"  Data failed: {format_size(total_failed_size)} ({total_failed_size:,} bytes)")
+        log(f"  Effective speed: {effective_speed / 1024 / 1024:.2f} MB/s")
 
-        print(f"\nTransfer Status:")
-        print(f"  Successful transfers: {successful_transfers}/{len(transfer_states)}")
-        print(f"  Failed transfers: {failed_transfers}/{len(transfer_states)}")
+        log(f"\nTransfer Status:")
+        log(f"  Successful transfers: {successful_transfers}/{len(transfer_states)}")
+        log(f"  Failed transfers: {failed_transfers}/{len(transfer_states)}")
 
         if failed_transfers > 0:
-            print(f"\nFailed Transfer Details:")
+            log(f"\nFailed Transfer Details:")
             for suffix, state in transfer_states.items():
                 if state.failed:
                     failed_size = sum(file_size_map.get(f, 0) for f in state.remaining_files)
-                    print(f"  Transfer {suffix}:")
-                    print(f"    Files remaining: {len(state.remaining_files)}")
-                    print(f"    Size remaining: {format_size(failed_size)}")
-                    print(f"    Retry attempts: {state.retry_count}")
+                    log(f"  Transfer {suffix}:")
+                    log(f"    Files remaining: {len(state.remaining_files)}")
+                    log(f"    Size remaining: {format_size(failed_size)}")
+                    log(f"    Retry attempts: {state.retry_count}")
 
         # Show retry statistics if any retries occurred
         total_retries = sum(state.retry_count for state in transfer_states.values())
         if total_retries > 0:
-            print(f"\nRetry Statistics:")
-            print(f"  Total retry attempts: {total_retries}")
+            log(f"\nRetry Statistics:")
+            log(f"  Total retry attempts: {total_retries}")
             for suffix, state in transfer_states.items():
                 if state.retry_count > 0:
-                    print(f"  Transfer {suffix}: {state.retry_count} retries")
+                    log(f"  Transfer {suffix}: {state.retry_count} retries")
 
         # Final status message
-        print(f"\n{'='*60}")
+        log(f"\n{'='*60}")
         if failed_transfers > 0:
-            print(f"TRANSFER COMPLETED WITH ERRORS: {successful_transfers} successful, {failed_transfers} failed")
             log(f"Transfer completed with errors: {successful_transfers} successful, {failed_transfers} failed")
         else:
-            print(f"ALL TRANSFERS COMPLETED SUCCESSFULLY")
             log("All transfers completed successfully")
-        print(f"{'='*60}\n")
+        log(f"{'='*60}\n")
 
     finally:
         # Stop the monitoring thread
