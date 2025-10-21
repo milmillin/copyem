@@ -98,6 +98,13 @@ def main() -> None:
         help="Polling interval in seconds for monitoring transfers (default: 0.5)",
     )
 
+    parser.add_argument(
+        "-f",
+        "--log-to-file",
+        action="store_true",
+        help="Log all transfer activity to a timestamped file (copyem_YYYYMMDD_HHMMSS.log)",
+    )
+
     args = parser.parse_args()
 
     src_dir = Path(args.src_dir)
@@ -219,7 +226,7 @@ def main() -> None:
         return
 
     # Initialize the LogManager with number of parallel transfers for status lines
-    copyem.logger.log_manager = LogManager(t, actual_parallel, total_size)
+    copyem.logger.log_manager = LogManager(t, actual_parallel, total_size, args.log_to_file)
     stop_event = threading.Event()
     monitor_thread = threading.Thread(target=monitor_stderr, args=(sel, stop_event))
 

@@ -17,7 +17,7 @@ from .utils import format_size, format_time
 class LogManager:
     """Manages terminal UI with scrolling messages and fixed status lines."""
 
-    def __init__(self, term: Terminal, num_status_lines: int, total_size: int = 0):
+    def __init__(self, term: Terminal, num_status_lines: int, total_size: int = 0, log_to_file: bool = False):
         self.term = term
         self.num_status_lines = num_status_lines
         self.total_size = total_size
@@ -32,11 +32,13 @@ class LogManager:
         # Create log file with timestamp
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.log_filename = f"copyem_{timestamp}.log"
-        try:
-            self.log_file = open(self.log_filename, "w", buffering=1)  # Line buffering
-        except Exception as e:
-            print(f"Warning: Could not create log file {self.log_filename}: {e}")
-            self.log_file = None
+        self.log_file = None
+        if log_to_file:
+            try:
+                self.log_file = open(self.log_filename, "w", buffering=1)  # Line buffering
+            except Exception as e:
+                print(f"Warning: Could not create log file {self.log_filename}: {e}")
+                self.log_file = None
 
         self.setup_display()
 
@@ -273,7 +275,7 @@ class LogManager:
         # Reset scrolling region to full terminal
         sys.stdout.write(self.term.csr(0, self.term.height))
         # Clear screen
-        # print(self.term.clear())
+        print(self.term.clear())
         sys.stdout.flush()
 
 
