@@ -15,18 +15,16 @@ A high-performance remote file transfer utility optimized for efficient bulk tra
 
 ## Installation
 
-### Using uv (recommended)
-
 ```bash
-uv pip install copyem
+pip install git+https://github.com/milmillin/copyem.git
 ```
 
-### From source
+## Development
 
 ```bash
-git clone https://github.com/yourusername/copyem.git
+git clone https://github.com/milmillin/copyem.git
 cd copyem
-uv pip install -e .
+uv sync
 ```
 
 ## Requirements
