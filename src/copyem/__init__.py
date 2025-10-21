@@ -12,7 +12,7 @@ from typing import IO, Dict, List, Tuple, Optional
 
 from .utils import parse_size_to_bytes, format_size, format_time
 from .logger import LogManager, log, monitor_stderr
-from .core import get_file_sizes, get_remote_file_sizes, schedule_files, transfer_files
+from .core import get_file_sizes, schedule_files, transfer_files, parse_remote_path
 
 # Global terminal and selector
 t = Terminal()
@@ -40,9 +40,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Remote copy utility for efficient file transfers. Copyem uses tar to archive files and then transfers them over the network. It uses buffers and optimal file scheduling to maximize throughput."
     )
-    parser.add_argument("src_dir", type=str, help="Source directory to copy")
-    parser.add_argument("remote", type=str, help="SSH remote (e.g., username@hostname.com)")
-    parser.add_argument("dst_dir", type=str, help="Target directory on remote")
+    parser.add_argument("src_dir", type=str, help="Source directory (local path or remote in format user@host:/path)")
+    parser.add_argument("dst_dir", type=str, help="Destination directory (local path or remote in format user@host:/path)")
     parser.add_argument("--include", type=str, help="Include files matching this pattern")
     parser.add_argument(
         "-s",
@@ -107,9 +106,15 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    src_dir = Path(args.src_dir)
-    if not src_dir.is_dir():
-        parser.error(f"Source directory does not exist: {src_dir}")
+    # Parse source and destination paths
+    src_remote, src_dir = parse_remote_path(args.src_dir)
+    dst_remote, dst_dir = parse_remote_path(args.dst_dir)
+
+    # Validate source directory exists (only for local paths)
+    if src_remote is None:
+        src_path = Path(src_dir)
+        if not src_path.is_dir():
+            parser.error(f"Source directory does not exist: {src_dir}")
 
     try:
         speed_bytes = parse_size_to_bytes(args.speed)
@@ -120,18 +125,18 @@ def main() -> None:
     # Get matching files
     log("Starting file discovery and size calculation")
 
-    file_sizes = get_file_sizes(src_dir, args.include)
+    file_sizes = get_file_sizes(src_dir, args.include, src_remote)
 
     # Calculate and format total size
     total_size = sum(size for _, size in file_sizes)
 
     log(f"Total size: {format_size(total_size)} ({total_size:,} bytes) across {len(file_sizes)} files")
 
-    # Check remote files to identify what needs to be transferred
-    log("Checking remote file sizes...")
+    # Check destination files to identify what needs to be transferred
+    log("Checking destination file sizes...")
 
-    # Get sizes of files that exist on remote
-    remote_file_info = get_remote_file_sizes(args.remote, args.dst_dir, [p[0] for p in file_sizes])
+    # Get sizes of files that exist on destination
+    remote_file_info = get_file_sizes(dst_dir, args.include, dst_remote)
 
     # Create a dict for quick lookup of remote file sizes
     remote_sizes = {path: size for path, size in remote_file_info}
@@ -201,8 +206,10 @@ def main() -> None:
     # Display transfer summary and ask for confirmation
     print(f"\n{'='*60}")
     print("Transfer Summary:")
-    print(f"  Source: {src_dir}")
-    print(f"  Destination: {args.remote}:{args.dst_dir}")
+    src_label = f"{src_remote}:" if src_remote else ""
+    dst_label = f"{dst_remote}:" if dst_remote else ""
+    print(f"  Source: {src_label}{src_dir}")
+    print(f"  Destination: {dst_label}{dst_dir}")
     print(f"  Total files: {len(file_sizes)}")
     print(f"  Total size: {format_size(total_size)}")
     print(f"  Smallest file: {format_size(smallest_file[1])}")
@@ -251,7 +258,7 @@ def main() -> None:
         for suffix, state in transfer_states.items():
             if state.remaining_files:
                 processes, file_handles, paths_to_unlink = transfer_files(
-                    state.remaining_files, src_dir, args.remote, args.dst_dir, buffer_bytes, suffix, sel
+                    state.remaining_files, src_dir, dst_dir, buffer_bytes, suffix, sel, src_remote, dst_remote
                 )
                 state.processes = processes
                 state.file_handles = file_handles
@@ -345,7 +352,7 @@ def main() -> None:
 
                         # Start new transfer with remaining files
                         processes, file_handles, paths_to_unlink = transfer_files(
-                            state.remaining_files, src_dir, args.remote, args.dst_dir, buffer_bytes, suffix, sel
+                            state.remaining_files, src_dir, dst_dir, buffer_bytes, suffix, sel, src_remote, dst_remote
                         )
                         state.processes = processes
                         state.file_handles = file_handles
