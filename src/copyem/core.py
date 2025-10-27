@@ -265,10 +265,10 @@ def transfer_files(
         processes = [tar_create_proc, mbuffer_proc, tar_extract_proc]
 
         if tar_extract_proc.stdout is not None:
-            sel.register(tar_extract_proc.stdout, selectors.EVENT_READ, data=f"tar-extract-{suffix}")
+            sel.register(tar_extract_proc.stdout, selectors.EVENT_READ, data=f"out-{suffix}")
             file_handles.append(tar_extract_proc.stdout)
         if tar_create_proc.stderr is not None:
-            sel.register(tar_create_proc.stderr, selectors.EVENT_READ, data=f"tar-create-{suffix}")
+            sel.register(tar_create_proc.stderr, selectors.EVENT_READ, data=f"in-{suffix}")
             file_handles.append(tar_create_proc.stderr)
 
     elif src_remote is None and dst_remote is not None:
@@ -288,10 +288,10 @@ def transfer_files(
         processes = [tar_proc, mbuffer_proc, ssh_proc]
 
         if ssh_proc.stdout is not None:
-            sel.register(ssh_proc.stdout, selectors.EVENT_READ, data=f"ssh-{suffix}")
+            sel.register(ssh_proc.stdout, selectors.EVENT_READ, data=f"out-{suffix}")
             file_handles.append(ssh_proc.stdout)
         if tar_proc.stderr is not None:
-            sel.register(tar_proc.stderr, selectors.EVENT_READ, data=f"tar-{suffix}")
+            sel.register(tar_proc.stderr, selectors.EVENT_READ, data=f"in-{suffix}")
             file_handles.append(tar_proc.stderr)
 
     elif src_remote is not None and dst_remote is None:
@@ -329,10 +329,10 @@ def transfer_files(
         processes = [ssh_tar_proc, mbuffer_proc, tar_extract_proc]
 
         if tar_extract_proc.stdout is not None:
-            sel.register(tar_extract_proc.stdout, selectors.EVENT_READ, data=f"tar-extract-{suffix}")
+            sel.register(tar_extract_proc.stdout, selectors.EVENT_READ, data=f"out-{suffix}")
             file_handles.append(tar_extract_proc.stdout)
         if ssh_tar_proc.stderr is not None:
-            sel.register(ssh_tar_proc.stderr, selectors.EVENT_READ, data=f"ssh-tar-{suffix}")
+            sel.register(ssh_tar_proc.stderr, selectors.EVENT_READ, data=f"in-{suffix}")
             file_handles.append(ssh_tar_proc.stderr)
 
     else:
@@ -369,10 +369,10 @@ def transfer_files(
         processes = [ssh_tar_create_proc, mbuffer_proc, ssh_tar_extract_proc]
 
         if ssh_tar_extract_proc.stdout is not None:
-            sel.register(ssh_tar_extract_proc.stdout, selectors.EVENT_READ, data=f"ssh-extract-{suffix}")
+            sel.register(ssh_tar_extract_proc.stdout, selectors.EVENT_READ, data=f"out-{suffix}")
             file_handles.append(ssh_tar_extract_proc.stdout)
         if ssh_tar_create_proc.stderr is not None:
-            sel.register(ssh_tar_create_proc.stderr, selectors.EVENT_READ, data=f"ssh-tar-{suffix}")
+            sel.register(ssh_tar_create_proc.stderr, selectors.EVENT_READ, data=f"in-{suffix}")
             file_handles.append(ssh_tar_create_proc.stderr)
 
     pipe = open(pipe_name, "rb")

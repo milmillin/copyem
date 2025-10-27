@@ -291,9 +291,9 @@ def main() -> None:
 
                     # Get completed files from SSH messages
                     if copyem.logger.log_manager is not None:
-                        ssh_messages = copyem.logger.log_manager.get_ssh_messages(f"ssh-{suffix}")[:-1]
+                        ssh_messages = copyem.logger.log_manager.get_ssh_messages(f"out-{suffix}")[:-1]
                         # Remove the last message from the list
-                        copyem.logger.log_manager.pop_ssh_messages(f"ssh-{suffix}")
+                        copyem.logger.log_manager.pop_ssh_messages(f"out-{suffix}")
                     else:
                         ssh_messages = []
 

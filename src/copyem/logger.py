@@ -122,7 +122,7 @@ class LogManager:
                 message = text[bracket_end + 1 :].strip()
 
                 # Check if this is an SSH message
-                if suffix.startswith("ssh-"):
+                if suffix.startswith("out-"):
                     # Store in the appropriate SSH message list
                     if suffix not in self.ssh_messages:
                         self.ssh_messages[suffix] = []
