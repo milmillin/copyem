@@ -7,14 +7,22 @@ import io
 import selectors
 import threading
 from pathlib import Path
-from typing import Optional, IO
+from typing import Optional, IO, NamedTuple
 import shlex
 
 from .logger import log
 from .utils import format_size, format_time
 
+
+class FileInfo(NamedTuple):
+    """File metadata containing size and modification time."""
+    size: int
+    modtime: int
+
+
 def quote_args(args: list[str]) -> str:
-    return ' '.join(shlex.quote(arg) for arg in args)
+    return " ".join(shlex.quote(arg) for arg in args)
+
 
 def parse_remote_path(path: str) -> tuple[Optional[str], str]:
     """Parse a path that may be in remote format (user@host:/path).
@@ -25,11 +33,11 @@ def parse_remote_path(path: str) -> tuple[Optional[str], str]:
     Returns:
         Tuple of (remote, dir_path) where remote is None for local paths
     """
-    if ':' in path:
-        parts = path.split(':', 1)
+    if ":" in path:
+        parts = path.split(":", 1)
         if len(parts) == 2 and parts[0]:
             # Check if it looks like a remote (has @ or is not a Windows drive letter)
-            if '@' in parts[0] or (len(parts[0]) > 1):
+            if "@" in parts[0] or (len(parts[0]) > 1):
                 return parts[0], parts[1]
     return None, path
 
@@ -37,7 +45,6 @@ def parse_remote_path(path: str) -> tuple[Optional[str], str]:
 def _run_lines(cmds: list[str], stdin: Optional[str] = None, cwd: Optional[Path] = None) -> list[str]:
     """Execute a command and return stdout, reporting line count during execution"""
     cmd_ = cmds[0]
-    print(cmds)
     print(f"[{cmd_}] 0 lines", end="\r")
 
     process = subprocess.Popen(
@@ -52,6 +59,7 @@ def _run_lines(cmds: list[str], stdin: Optional[str] = None, cwd: Optional[Path]
     # Write stdin in a separate thread to avoid deadlock
     stdin_thread = None
     if stdin is not None:
+
         def write_stdin():
             assert process.stdin is not None
             process.stdin.write(stdin)
@@ -84,7 +92,53 @@ def _run_lines(cmds: list[str], stdin: Optional[str] = None, cwd: Optional[Path]
     return lines
 
 
-def get_file_sizes(dir_path: str, include_pattern: Optional[str], remote: Optional[str] = None) -> list[tuple[str, int]]:
+def get_file_info(dir_path: str, files: list[str], remote: Optional[str] = None) -> list[tuple[str, FileInfo]]:
+    """Get file information for a list of files.
+
+    Args:
+        dir_path: Directory path containing the files
+        files: List of file paths
+        remote: Optional SSH remote (e.g., username@hostname.com) for remote directories
+
+    Returns:
+        List of tuples of (path, FileInfo) where FileInfo contains size and modtime
+    """
+
+    if len(files) == 0:
+        return []
+
+    # Calculate file sizes
+    log(f"Querying file sizes")
+    res: list[tuple[str, FileInfo]] = []
+
+    batch_size = 100000
+    for i in range(0, len(files), batch_size):
+        cur_files = files[i : i + batch_size]
+        stdin_data = "\n".join(cur_files)
+
+        if remote is None:
+            # Local stat
+            stat_args = ["xargs", "stat", "--format=%s\t%Y\t%n"]
+            sizes = _run_lines(stat_args, stdin=stdin_data, cwd=Path(dir_path))
+        else:
+            # Remote stat via SSH
+            stat_cmd = f"cd {dir_path} && xargs stat '--format=%s\t%Y\t%n' 2> /dev/null"
+            sizes = _run_lines(["ssh", remote, stat_cmd], stdin=stdin_data)
+
+        for size_line in sizes:
+            try:
+                size, modtime, path = size_line.split("\t", 2)
+                res.append((path, FileInfo(size=int(size), modtime=int(modtime))))
+            except ValueError:
+                pass
+
+    log(f"Successfully queried {len(res)} file sizes")
+    return res
+
+
+def find_and_get_file_info(
+    dir_path: str, include_pattern: Optional[str], remote: Optional[str] = None
+) -> list[tuple[str, FileInfo]]:
     """Get all files in a directory that match the include pattern.
 
     Args:
@@ -93,7 +147,7 @@ def get_file_sizes(dir_path: str, include_pattern: Optional[str], remote: Option
         remote: Optional SSH remote (e.g., username@hostname.com) for remote directories
 
     Returns:
-        List of tuples of (path, size) for matching files
+        List of tuples of (path, FileInfo) where FileInfo contains size and modtime
     """
     log(f"Scanning directory: {remote + ':' if remote else ''}{dir_path}")
     if include_pattern:
@@ -119,36 +173,12 @@ def get_file_sizes(dir_path: str, include_pattern: Optional[str], remote: Option
         files.extend(_run_lines(["ssh", remote, find_link_cmd]))
 
     log(f"Found {len(files):,} files")
-    for f in files[:10]:
+    for f in files[:5]:
+        log(f"  {f}")
+    for f in files[max(5, len(files) - 5):]:
         log(f"  {f}")
 
-    if len(files) == 0:
-        return []
-
-    # Calculate file sizes
-    log(f"Querying file sizes")
-    res: list[tuple[str, int]] = []
-
-    batch_size = 100000
-    for i in range(0, len(files), batch_size):
-        cur_files = files[i : i + batch_size]
-        stdin_data = "\n".join(cur_files)
-
-        if remote is None:
-            # Local stat
-            stat_args = ["xargs", "stat", "--format=%s\t%n"]
-            sizes = _run_lines(stat_args, stdin=stdin_data, cwd=Path(dir_path))
-        else:
-            # Remote stat via SSH
-            stat_cmd = f"cd {dir_path} && xargs stat '--format=%s\t%n' 2> /dev/null"
-            sizes = _run_lines(["ssh", remote, stat_cmd], stdin=stdin_data)
-
-        for size_line in sizes:
-            size, path = size_line.split('\t', 1)
-            res.append((path, int(size)))
-
-    log(f"Successfully queried {len(res)} file sizes")
-    return res
+    return get_file_info(dir_path, files, remote)
 
 
 def schedule_files(
@@ -253,12 +283,16 @@ def transfer_files(
         tar_create_cmd = ["tar", "-cvf", "-", "-T", str(filelist_path)]
         tar_extract_cmd = ["tar", "-xvf", "-", "-C", dst_dir]
 
-        tar_create_proc = subprocess.Popen(tar_create_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=Path(src_dir))
+        tar_create_proc = subprocess.Popen(
+            tar_create_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=Path(src_dir)
+        )
         mbuffer_proc = subprocess.Popen(mbuffer_cmd, stdin=tar_create_proc.stdout, stdout=subprocess.PIPE)
         assert tar_create_proc.stdout is not None
         tar_create_proc.stdout.close()
 
-        tar_extract_proc = subprocess.Popen(tar_extract_cmd, stdin=mbuffer_proc.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        tar_extract_proc = subprocess.Popen(
+            tar_extract_cmd, stdin=mbuffer_proc.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
         assert mbuffer_proc.stdout is not None
         mbuffer_proc.stdout.close()
 
@@ -302,16 +336,13 @@ def transfer_files(
 
         # Send filelist via stdin to the remote tar command
         ssh_tar_proc = subprocess.Popen(
-            ssh_tar_cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
+            ssh_tar_cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
         )
 
         # Write filelist to stdin in a thread
         def write_filelist():
             assert ssh_tar_proc.stdin is not None
-            with open(filelist_path, 'r') as f:
+            with open(filelist_path, "r") as f:
                 ssh_tar_proc.stdin.write(f.read().encode())
             ssh_tar_proc.stdin.close()
 
@@ -322,7 +353,9 @@ def transfer_files(
         assert ssh_tar_proc.stdout is not None
         ssh_tar_proc.stdout.close()
 
-        tar_extract_proc = subprocess.Popen(tar_extract_cmd, stdin=mbuffer_proc.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        tar_extract_proc = subprocess.Popen(
+            tar_extract_cmd, stdin=mbuffer_proc.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
         assert mbuffer_proc.stdout is not None
         mbuffer_proc.stdout.close()
 
@@ -342,16 +375,13 @@ def transfer_files(
 
         # Send filelist via stdin to the remote tar command
         ssh_tar_create_proc = subprocess.Popen(
-            ssh_tar_create_cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
+            ssh_tar_create_cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
         )
 
         # Write filelist to stdin in a thread
         def write_filelist():
             assert ssh_tar_create_proc.stdin is not None
-            with open(filelist_path, 'r') as f:
+            with open(filelist_path, "r") as f:
                 ssh_tar_create_proc.stdin.write(f.read().encode())
             ssh_tar_create_proc.stdin.close()
 
@@ -362,7 +392,9 @@ def transfer_files(
         assert ssh_tar_create_proc.stdout is not None
         ssh_tar_create_proc.stdout.close()
 
-        ssh_tar_extract_proc = subprocess.Popen(ssh_tar_extract_cmd, stdin=mbuffer_proc.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        ssh_tar_extract_proc = subprocess.Popen(
+            ssh_tar_extract_cmd, stdin=mbuffer_proc.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
         assert mbuffer_proc.stdout is not None
         mbuffer_proc.stdout.close()
 

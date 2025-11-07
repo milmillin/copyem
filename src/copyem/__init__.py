@@ -12,7 +12,7 @@ from typing import IO, Dict, List, Tuple, Optional
 
 from .utils import parse_size_to_bytes, format_size, format_time
 from .logger import LogManager, log, monitor_stderr
-from .core import get_file_sizes, schedule_files, transfer_files, parse_remote_path
+from .core import find_and_get_file_info, schedule_files, transfer_files, parse_remote_path, get_file_info, FileInfo
 
 # Global terminal and selector
 t = Terminal()
@@ -41,7 +41,9 @@ def main() -> None:
         description="Remote copy utility for efficient file transfers. Copyem uses tar to archive files and then transfers them over the network. It uses buffers and optimal file scheduling to maximize throughput."
     )
     parser.add_argument("src_dir", type=str, help="Source directory (local path or remote in format user@host:/path)")
-    parser.add_argument("dst_dir", type=str, help="Destination directory (local path or remote in format user@host:/path)")
+    parser.add_argument(
+        "dst_dir", type=str, help="Destination directory (local path or remote in format user@host:/path)"
+    )
     parser.add_argument("--include", type=str, help="Include files matching this pattern")
     parser.add_argument(
         "-s",
@@ -125,66 +127,67 @@ def main() -> None:
     # Get matching files
     log("Starting file discovery and size calculation")
 
-    file_sizes = get_file_sizes(src_dir, args.include, src_remote)
+    file_info = find_and_get_file_info(src_dir, args.include, src_remote)
 
     # Calculate and format total size
-    total_size = sum(size for _, size in file_sizes)
+    total_size = sum(info.size for _, info in file_info)
 
-    log(f"Total size: {format_size(total_size)} ({total_size:,} bytes) across {len(file_sizes)} files")
+    log(f"Total size: {format_size(total_size)} ({total_size:,} bytes) across {len(file_info)} files")
 
     # Check destination files to identify what needs to be transferred
     log("Checking destination file sizes...")
 
     # Get sizes of files that exist on destination
-    remote_file_info = get_file_sizes(dst_dir, args.include, dst_remote)
+    remote_file_info = get_file_info(dst_dir, [f[0] for f in file_info], dst_remote)
 
     # Create a dict for quick lookup of remote file sizes
-    remote_sizes = {path: size for path, size in remote_file_info}
+    remote_infos = {path: (info.size, info.modtime) for path, info in remote_file_info}
 
     # Filter out files that already exist with same size on remote
-    files_to_transfer = []
-    skipped_files = []
-    for file_path, local_size in file_sizes:
-        if file_path in remote_sizes:
-            if remote_sizes[file_path] == local_size:
-                skipped_files.append((file_path, local_size))
+    files_to_transfer: list[tuple[str, int]] = []
+    skipped_files: list[tuple[str, int]] = []
+    for file_path, fi in file_info:
+        info = (fi.size, fi.modtime)
+        if file_path in remote_infos:
+            if remote_infos[file_path] == info:
+                skipped_files.append((file_path, fi.size))
             else:
                 # File exists but size differs - transfer it
-                files_to_transfer.append((file_path, local_size))
+                files_to_transfer.append((file_path, fi.size))
         else:
             # File doesn't exist on remote - transfer it
-            files_to_transfer.append((file_path, local_size))
+            files_to_transfer.append((file_path, fi.size))
 
     if skipped_files:
-        log(f"Skipping {len(skipped_files)} files that already exist on remote with same size")
+        log(f"Skipping {len(skipped_files)} files that already exist on remote with same size and modification time")
 
     if not files_to_transfer:
         log("All files already exist on remote with matching sizes. Nothing to transfer.")
         return
 
     # Update file_sizes to only include files that need transfer
-    file_sizes = files_to_transfer
+    file_info = files_to_transfer
 
     # HACK: add TAR header of 512 bytes and extra for long paths. I don't know exactly how TAR encoding works.
-    file_sizes = [(f[0], f[1] + 512 + max(len(f[0]) - 100, 0)) for f in file_sizes]
+    file_info = [(f[0], f[1] + 512 + max(len(f[0]) - 100, 0)) for f in file_info]
 
     # Create file size mappings for each parallel transfer
-    file_size_map: Dict[str, int] = {filepath: size for filepath, size in file_sizes}
+    file_size_map: Dict[str, int] = {filepath: size for filepath, size in file_info}
 
-    total_size = sum(size for _, size in file_sizes)
+    total_size = sum(size for _, size in file_info)
 
-    log(f"Will transfer: {format_size(total_size)} ({total_size:,} bytes) across {len(file_sizes)} files")
+    log(f"Will transfer: {format_size(total_size)} ({total_size:,} bytes) across {len(file_info)} files")
 
     log("Scheduling Files")
 
     # Adjust parallel count if we have fewer files than requested parallel transfers
-    actual_parallel = min(args.parallel, len(file_sizes))
+    actual_parallel = min(args.parallel, len(file_info))
     if actual_parallel < args.parallel:
         log(f"Adjusting parallel transfers from {args.parallel} to {actual_parallel} (limited by file count)")
 
     file_parts: list[list[tuple[str, int]]] = [[] for _ in range(actual_parallel)]
-    file_sizes.sort(key=lambda x: x[1])
-    for i, f_ in enumerate(file_sizes):
+    file_info.sort(key=lambda x: x[1])
+    for i, f_ in enumerate(file_info):
         file_parts[i % actual_parallel].append(f_)
 
     ordered_files: list[list[str]] = []
@@ -200,8 +203,8 @@ def main() -> None:
     estimated_speed = total_size / overall_eta / 1024 / 1024 if overall_eta > 0 else 0
 
     # Get smallest and largest file sizes
-    smallest_file = min(file_sizes, key=lambda x: x[1]) if file_sizes else (None, 0)
-    largest_file = max(file_sizes, key=lambda x: x[1]) if file_sizes else (None, 0)
+    smallest_file = min(file_info, key=lambda x: x[1]) if file_info else (None, 0)
+    largest_file = max(file_info, key=lambda x: x[1]) if file_info else (None, 0)
 
     # Display transfer summary and ask for confirmation
     print(f"\n{'='*60}")
@@ -210,7 +213,7 @@ def main() -> None:
     dst_label = f"{dst_remote}:" if dst_remote else ""
     print(f"  Source: {src_label}{src_dir}")
     print(f"  Destination: {dst_label}{dst_dir}")
-    print(f"  Total files: {len(file_sizes)}")
+    print(f"  Total files: {len(file_info)}")
     print(f"  Total size: {format_size(total_size)}")
     print(f"  Smallest file: {format_size(smallest_file[1])}")
     print(f"  Largest file: {format_size(largest_file[1])}")
@@ -406,7 +409,7 @@ def main() -> None:
         successful_transfers = sum(1 for s in transfer_states.values() if s.completed)
         failed_transfers = sum(1 for s in transfer_states.values() if s.failed)
         total_files_failed = sum(len(state.remaining_files) for state in transfer_states.values() if state.failed)
-        total_files_transferred = len(file_sizes) - total_files_failed
+        total_files_transferred = len(file_info) - total_files_failed
 
         # Calculate effective speed
         effective_speed = total_transferred / total_elapsed if total_elapsed > 0 else 0
@@ -418,7 +421,7 @@ def main() -> None:
 
         log(f"\nTransfer Statistics:")
         log(f"  Total time: {format_time(total_elapsed)}")
-        log(f"  Files transferred: {total_files_transferred}/{len(file_sizes)}")
+        log(f"  Files transferred: {total_files_transferred}/{len(file_info)}")
         log(f"  Data transferred: {format_size(total_transferred)} ({total_transferred:,} bytes)")
         if total_failed_size > 0:
             log(f"  Files failed: {total_files_failed}")
