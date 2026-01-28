@@ -194,7 +194,7 @@ These logs can be analyzed using the included visualization script in `metrics/v
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/copyem.git
+git clone https://github.com/milmillin/copyem.git
 cd copyem
 
 # Install with development dependencies
@@ -204,7 +204,7 @@ uv pip install -e ".[dev]"
 ### Running Tests
 
 ```bash
-# Run the transfer with verbose output
+# You can run the transfer if you have remote hosts and test files
 copyem /test/source user@host /test/dest --parallel 2
 ```
 
@@ -214,10 +214,6 @@ The `metrics/visualize_latency.py` script can analyze log files to visualize:
 - Inter-arrival times between files
 - Transfer latencies between parallel streams
 - Performance bottlenecks
-
-## License
-
-[Add your license information here]
 
 ## Contributing
 

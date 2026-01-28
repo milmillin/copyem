@@ -106,6 +106,12 @@ def main() -> None:
         help="Log all transfer activity to a timestamped file (copyem_YYYYMMDD_HHMMSS.log)",
     )
 
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Skip destination file checking and transfer all files unconditionally",
+    )
+
     args = parser.parse_args()
 
     # Parse source and destination paths
@@ -134,36 +140,42 @@ def main() -> None:
 
     log(f"Total size: {format_size(total_size)} ({total_size:,} bytes) across {len(file_info)} files")
 
-    # Check destination files to identify what needs to be transferred
-    log("Checking destination file sizes...")
+    if args.force:
+        # Skip destination checking - transfer all files unconditionally
+        files_to_transfer = [(path, info.size) for path, info in file_info]
+        skipped_files = []
+        log("Force mode: skipping destination file checking")
+    else:
+        # Check destination files to identify what needs to be transferred
+        log("Checking destination file sizes...")
 
-    # Get sizes of files that exist on destination
-    remote_file_info = get_file_info(dst_dir, [f[0] for f in file_info], dst_remote)
+        # Get sizes of files that exist on destination
+        remote_file_info = get_file_info(dst_dir, [f[0] for f in file_info], dst_remote)
 
-    # Create a dict for quick lookup of remote file sizes
-    remote_infos = {path: (info.size, info.modtime) for path, info in remote_file_info}
+        # Create a dict for quick lookup of remote file sizes
+        remote_infos = {path: (info.size, info.modtime) for path, info in remote_file_info}
 
-    # Filter out files that already exist with same size on remote
-    files_to_transfer: list[tuple[str, int]] = []
-    skipped_files: list[tuple[str, int]] = []
-    for file_path, fi in file_info:
-        info = (fi.size, fi.modtime)
-        if file_path in remote_infos:
-            if remote_infos[file_path] == info:
-                skipped_files.append((file_path, fi.size))
+        # Filter out files that already exist with same size on remote
+        files_to_transfer: list[tuple[str, int]] = []
+        skipped_files: list[tuple[str, int]] = []
+        for file_path, fi in file_info:
+            info = (fi.size, fi.modtime)
+            if file_path in remote_infos:
+                if remote_infos[file_path] == info:
+                    skipped_files.append((file_path, fi.size))
+                else:
+                    # File exists but size differs - transfer it
+                    files_to_transfer.append((file_path, fi.size))
             else:
-                # File exists but size differs - transfer it
+                # File doesn't exist on remote - transfer it
                 files_to_transfer.append((file_path, fi.size))
-        else:
-            # File doesn't exist on remote - transfer it
-            files_to_transfer.append((file_path, fi.size))
 
-    if skipped_files:
-        log(f"Skipping {len(skipped_files)} files that already exist on remote with same size and modification time")
+        if skipped_files:
+            log(f"Skipping {len(skipped_files)} files that already exist on remote with same size and modification time")
 
-    if not files_to_transfer:
-        log("All files already exist on remote with matching sizes. Nothing to transfer.")
-        return
+        if not files_to_transfer:
+            log("All files already exist on remote with matching sizes. Nothing to transfer.")
+            return
 
     # Update file_sizes to only include files that need transfer
     file_info = files_to_transfer
