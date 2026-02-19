@@ -6,6 +6,7 @@ import selectors
 import io
 import time
 import subprocess
+import shlex
 from pathlib import Path
 from blessed import Terminal
 from typing import IO, Dict, List, Tuple, Optional
@@ -20,6 +21,7 @@ from .core import (
     get_file_info,
     FileInfo,
     estimate_tar_file_size,
+    SENTINEL_PREFIX,
 )
 
 # Global terminal and selector
@@ -42,6 +44,23 @@ class TransferState:
         self.retry_count = 0
         self.completed = False
         self.failed = False
+
+
+def _cleanup_dst_sentinel(dst_dir: str, dst_remote: Optional[str], suffix: str) -> None:
+    """Remove the sentinel file from the destination directory."""
+    sentinel_name = f"{SENTINEL_PREFIX}{suffix}"
+    try:
+        if dst_remote is not None:
+            subprocess.run(
+                ["ssh", dst_remote, f"rm -f {shlex.quote(dst_dir + '/' + sentinel_name)}"],
+                timeout=10,
+            )
+        else:
+            dst_sentinel = Path(dst_dir) / sentinel_name
+            if dst_sentinel.exists():
+                dst_sentinel.unlink()
+    except (OSError, subprocess.TimeoutExpired):
+        pass
 
 
 def main() -> None:
@@ -319,11 +338,16 @@ def main() -> None:
                     # Transfer failed
                     log(f"Transfer {suffix} failed (process exited with code {failed_proc.returncode})")
 
-                    # Get completed files from SSH messages
+                    # Get completed files from SSH messages, using sentinel to confirm completeness
                     if copyem.logger.log_manager is not None:
-                        ssh_messages = copyem.logger.log_manager.get_ssh_messages(f"out-{suffix}")[:-1]
-                        # Remove the last message from the list
-                        copyem.logger.log_manager.pop_ssh_messages(f"out-{suffix}")
+                        ssh_messages = copyem.logger.log_manager.get_ssh_messages(f"out-{suffix}")
+                        # Filter out sentinel files; if sentinel is present, all preceding files are complete
+                        sentinel_seen = any(Path(m).name.startswith(SENTINEL_PREFIX) for m in ssh_messages)
+                        ssh_messages = [m for m in ssh_messages if not Path(m).name.startswith(SENTINEL_PREFIX)]
+                        if not sentinel_seen:
+                            # Sentinel not reached — last file may be incomplete, drop it
+                            ssh_messages = ssh_messages[:-1]
+                            copyem.logger.log_manager.pop_ssh_messages(f"out-{suffix}")
                     else:
                         ssh_messages = []
 
@@ -368,6 +392,9 @@ def main() -> None:
                         except:
                             pass
 
+                    # Clean up sentinel from destination
+                    _cleanup_dst_sentinel(dst_dir, dst_remote, suffix)
+
                     # Prepare for retry
                     state.remaining_files = [f for f in state.remaining_files if f not in completed_files]
 
@@ -411,6 +438,9 @@ def main() -> None:
                                 path.unlink()
                         except:
                             pass
+
+                    # Clean up sentinel from destination
+                    _cleanup_dst_sentinel(dst_dir, dst_remote, suffix)
 
             all_terminated = all(state.completed or state.failed for state in transfer_states.values())
 

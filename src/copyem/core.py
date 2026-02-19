@@ -13,6 +13,8 @@ import shlex
 from .logger import log
 from .utils import format_size, format_time
 
+SENTINEL_PREFIX = ".copyem_sentinel_"
+
 
 class FileInfo(NamedTuple):
     """File metadata containing size and modification time."""
@@ -260,6 +262,15 @@ def transfer_files(
     filelist_path = Path(f.name)
     for file in filelist:
         f.write(file + "\n")
+
+    # For local-source transfers, append a zero-byte sentinel file as end-of-transfer marker
+    sentinel_path: Optional[Path] = None
+    if src_remote is None:
+        sentinel_name = f"{SENTINEL_PREFIX}{suffix}"
+        sentinel_path = Path(src_dir) / sentinel_name
+        sentinel_path.touch()
+        f.write(f"./{sentinel_name}\n")
+
     f.close()
 
     pipe_name = tempfile.mkdtemp() + "/pipe"
@@ -407,6 +418,8 @@ def transfer_files(
     pipe = open(pipe_name, "rb")
     file_handles.insert(0, pipe)
     paths_to_unlink = [filelist_path, Path(pipe_name)]
+    if sentinel_path is not None:
+        paths_to_unlink.append(sentinel_path)
 
     sel.register(pipe, selectors.EVENT_READ, data=f"mbuffer-{suffix}")
 
