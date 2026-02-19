@@ -16,6 +16,7 @@ from .utils import format_size, format_time
 
 class FileInfo(NamedTuple):
     """File metadata containing size and modification time."""
+
     size: int
     modtime: int
 
@@ -173,10 +174,6 @@ def find_and_get_file_info(
         files.extend(_run_lines(["ssh", remote, find_link_cmd]))
 
     log(f"Found {len(files):,} files")
-    for f in files[:5]:
-        log(f"  {f}")
-    for f in files[max(5, len(files) - 5):]:
-        log(f"  {f}")
 
     return get_file_info(dir_path, files, remote)
 
@@ -414,3 +411,25 @@ def transfer_files(
     sel.register(pipe, selectors.EVENT_READ, data=f"mbuffer-{suffix}")
 
     return processes, file_handles, paths_to_unlink
+
+
+_BLOCK = 512
+
+
+def estimate_tar_file_size(name: str, size: int) -> int:
+    """Estimate the size of a file's entry in a tar archive.
+
+    Each file has a 512-byte header block followed by file data padded to
+    512 bytes. Filenames over 100 bytes get an additional 'L' (LongLink)
+    entry: a 512-byte header plus the filename padded to 512-byte blocks.
+    """
+
+    # Header + file data blocks
+    size = _BLOCK + ((size + _BLOCK - 1) // _BLOCK) * _BLOCK
+
+    # LongLink entry for names over 100 bytes
+    name_bytes = len(name.encode("utf-8"))
+    if name_bytes > 100:
+        size += _BLOCK + ((name_bytes + _BLOCK - 1) // _BLOCK) * _BLOCK
+
+    return size

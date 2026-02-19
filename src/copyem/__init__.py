@@ -12,7 +12,15 @@ from typing import IO, Dict, List, Tuple, Optional
 
 from .utils import parse_size_to_bytes, format_size, format_time
 from .logger import LogManager, log, monitor_stderr
-from .core import find_and_get_file_info, schedule_files, transfer_files, parse_remote_path, get_file_info, FileInfo
+from .core import (
+    find_and_get_file_info,
+    schedule_files,
+    transfer_files,
+    parse_remote_path,
+    get_file_info,
+    FileInfo,
+    estimate_tar_file_size,
+)
 
 # Global terminal and selector
 t = Terminal()
@@ -171,7 +179,9 @@ def main() -> None:
                 files_to_transfer.append((file_path, fi.size))
 
         if skipped_files:
-            log(f"Skipping {len(skipped_files)} files that already exist on remote with same size and modification time")
+            log(
+                f"Skipping {len(skipped_files)} files that already exist on remote with same size and modification time"
+            )
 
         if not files_to_transfer:
             log("All files already exist on remote with matching sizes. Nothing to transfer.")
@@ -180,8 +190,13 @@ def main() -> None:
     # Update file_sizes to only include files that need transfer
     file_info = files_to_transfer
 
-    # HACK: add TAR header of 512 bytes and extra for long paths. I don't know exactly how TAR encoding works.
-    file_info = [(f[0], f[1] + 512 + max(len(f[0]) - 100, 0)) for f in file_info]
+    for f in file_info[:5]:
+        log(f"  {f[0]}")
+    for f in file_info[max(5, len(file_info) - 5) :]:
+        log(f"  {f[0]}")
+
+    # Estimate the size of each file in the tar archive
+    file_info = [(f[0], estimate_tar_file_size(f[0], f[1])) for f in file_info]
 
     # Create file size mappings for each parallel transfer
     file_size_map: Dict[str, int] = {filepath: size for filepath, size in file_info}
